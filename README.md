@@ -1,6 +1,6 @@
 # jev-mcp
 
-Transaction category suggestions on Family-PaaS Lambda + HTTP API Gateway, with review-only defaults and explicit opt-in eligibility for automatic submission. Bruh reads Tiller rows/categories using its existing Google Drive connection and submits eligible results itself. This service has no Sheets access, Google credentials, budget writes, transaction persistence, or arbitrary URL tool. Existing OAuth authorization-code storage is unchanged.
+An authenticated, general-purpose MCP interface to Jev. Callers supply their own text/JSON state, typed questions, instructions and criteria. The server forwards supported inference requests to the fixed TypeSafe endpoint and returns the model response faithfully. Receipt preparation, categorization, review rules, thresholds and any downstream actions belong in the caller workflow.
 
 ## Local verification
 
@@ -10,92 +10,67 @@ npm test
 npm run typecheck
 npm run lint
 npm run build
-npm run evaluate -- test/evaluation.synthetic.json
 terraform -chdir=terraform init -backend=false
 terraform -chdir=terraform validate
 terraform -chdir=terraform test
 terraform fmt -check -recursive terraform
 ```
 
-Tests use synthetic data and mocked inference/Secrets Manager; JWT tests use ephemeral test keys. These commands do not call Jev or provision AWS. The Lambda bundle follows the platform's CommonJS `index.handler` convention; the deploy ZIP contains the bundle without this repository's ESM package.json.
+Tests use synthetic state and mocked inference/Secrets Manager. JWT tests use ephemeral test keys. These checks do not call Jev or provision AWS. Lambda packaging follows Family-PaaS's CommonJS `index.handler` convention.
 
-## Tool and policy
+## General inference contract (0.3.0)
 
-`POST /mcp` implements stateless Streamable HTTP JSON responses (2025-06-18 and 2025-03-26). It supports initialize, ping, tools/list, tools/call, and notification acknowledgement. GET/DELETE return 405; no sessions or SSE streams are allocated. Send `Accept: application/json, text/event-stream`, JSON content type, and the negotiated `MCP-Protocol-Version` on subsequent requests.
-
-The only tool is `suggest_transaction_categories`:
+The only advertised tool is `evaluate_state`. Its arguments mirror the supported Jev evaluation request:
 
 ```json
 {
-  "transactions": [{"id":"opaque-1","description":"Synthetic coffee shop"}],
-  "categories": [{"id":"food","definition":"Food and drink purchases"}]
-}
-```
-
-Transactions may include `context` (now 4000 characters) and `itemEvidence` (1000 characters). Descriptions remain limited to 500 characters, opaque IDs to 80 ASCII letters/digits/underscore/hyphen, batches to 10 targets, and categories to 50 definitions of 500 characters each. Category IDs remain safe aliases; Bruh maps them back to the exact Tiller labels, including spaces and punctuation. Supply only submit-ready budget categories, excluding Categorize Later/unknown placeholders, and map those history labels to `null`. Inputs reject extra fields. The decoded request limit is now 512 KiB, including JSON-RPC framing; both raw and base64-encoded requests are bounded. Avoid account numbers, balances, credentials and unnecessary spreadsheet columns.
-
-### Daily-workflow contract (service 0.2.0, policy 2)
-
-All new fields are optional. An existing request still returns suggestions requiring human review. To enable submission eligibility, pass `allowAutomaticSubmission: true` and set each target's `target` to `categorize_later` or `receipt_line_item`. These are caller assertions about the exact row or item being processed; the service cannot inspect the sheet to verify them. Opaque target IDs must map to the exact row or receipt item. Only exact Categorize Later rows and caller-verified receipt items are authorized workflow targets.
-
-```json
-{
-  "allowAutomaticSubmission": true,
-  "categories": [
-    {"id": "fuel", "definition": "Exact Tiller label: Auto: Fuel & Gas"},
-    {"id": "food", "definition": "Exact Tiller label: Food & Dining"}
-  ],
-  "recentTransactions": [
-    {"transactionId": "prior-1", "description": "Synthetic coffee shop", "categoryId": "food", "amount": -4.5},
-    {"transactionId": "prior-2", "description": "Synthetic unknown purchase", "categoryId": null}
-  ],
-  "transactions": [
-    {
-      "id": "current-1",
-      "target": "categorize_later",
-      "description": "COSTCO GAS #123",
-      "context": "Synthetic whole-transaction example; no receipt is available.",
-      "sameMerchantTransactions": [
-        {"transactionId": "prior-3", "description": "COSTCO GAS #123", "categoryId": "fuel"}
-      ]
+  "state": {
+    "message": "Synthetic damaged parcel",
+    "context": ["Additional background supplied by the caller"]
+  },
+  "model": "jev-latest",
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Which department handles this?",
+      "criteria": {
+        "Customer Support": "Help with damaged parcels",
+        "Other / unknown": null
+      }
     },
-    {
-      "id": "receipt-item-1",
-      "target": "receipt_line_item",
-      "description": "Synthetic Walmart purchase",
-      "itemEvidence": "Coffee beans, exact verified receipt line item",
-      "receiptVerification": {"matchesTransaction": true, "splitArithmeticVerified": true}
+    "severity": {
+      "type": "score",
+      "instructions": "Rate the severity.",
+      "criteria": ["Low", "Medium", "High"]
+    },
+    "urgent": {
+      "type": "noul",
+      "instructions": "Is it time-sensitive?",
+      "criteria": {"true": "Urgent", "false": "Can wait"}
     }
-  ]
+  }
 }
 ```
 
-`recentTransactions` holds up to 20 actual recent transactions, shared across the batch. `sameMerchantTransactions` holds up to 10 prior transactions for each target's merchant. Each history entry requires `transactionId`, `description` (1–400 characters), and `categoryId` (a supplied alias or `null` for unknown); `amount` is optional and bounded to ±1 billion. Use `null` for uncategorized/Categorize Later labels rather than inventing a category. IDs are unique within each history list, must exclude **all current batch targets**, and are stripped before calling Jev. Overlap between recent and same-merchant lists is permitted; those repeated examples are not independent evidence. The caller selects the true recent ordering and verifies same-merchant identity; the server cannot fetch or verify sheet history. Up to 30 context slots per target are supported without flattening histories across merchants.
+- `state` is required: a string, JSON object or array. Put arbitrary context/history inside state; there is no separate invented context field, spreadsheet schema or hidden transformation.
+- `model` is optional (1–100 characters). Omission uses the deployed `JEV_MODEL`. Supported aliases include `jev-latest` and `jev-preview`; a supported versioned model can also be selected. Availability is determined by TypeSafe, not by a hard-coded local model list.
+- `questions` is a map of 1–20 named typed questions. Names and Choice labels support spaces/punctuation, up to 128 characters. Prototype-sensitive map keys `__proto__`, `constructor`, and `prototype` are rejected; those keys are still preserved as inert content inside state/instructions.
+- Every question requires `type` and `instructions`. Instructions accept a string, JSON object or array. Choice requires a map of 1–255 criteria, each a string, object, array or null. Score requires an ordered array of 2–10 level descriptions (string, object or array). Noul optionally accepts a criteria object with `true` and/or `false` descriptions.
+- State and structured instruction/criterion values are JSON only, bounded at 32 nested levels and 20000 nodes per content value. A decoded MCP request is capped at 512 KiB; raw and base64 input are both checked. These are service safety limits, not promises that every allowed byte payload fits Jev's token window. Upstream context-window/rate-limit errors return safe tool errors.
 
-With line items available, set `target: "receipt_line_item"` and supply the exact `itemEvidence`. The caller must verify receipt-to-transaction matching and the entire split's arithmetic, including tax, shipping and adjustments, before asserting both receipt verification booleans. Each item gets its own opaque ID. The service does not perform receipt lookup, matching, amount reconciliation, splitting, or spreadsheet updates. An item mistakenly tagged `categorize_later` remains review-required. Legacy `itemEvidence` without verification still produces review-only suggestions.
+Question IDs, state, instructions, criteria and option names are forwarded as supplied. No system prompt, merchant rule, category alias, history selection, insufficient-information option, confidence threshold, receipt verification or eligibility policy is inserted. Callers include any uncertainty outcome or relevant data themselves. Arbitrary URLs in state are inert text; the server never fetches them. Tool arguments cannot override the HTTP endpoint, headers, method or credentials.
 
-Without line items, categorize the whole transaction. A specific dedicated fuel descriptor (for example `COSTCO GAS #123` or `Walmart Fuel 123`) establishes whole-transaction purpose without a receipt. For other purposes or a generic merchant descriptor, the caller can supply:
+Success returns the **original Jev response** in both MCP `structuredContent` and JSON text content: `model`, `answers`, and `usage`, including any actual additional response fields. Choice returns choice/probabilities/confidence; Score returns score/legend/probabilities/confidence; Noul returns noul. Noul is not given invented confidence. No review or automatic-submission fields are added, and no rationale is generated. Choice/Score confidence measures distribution concentration, not calibrated correctness. Reading the result and deciding what action to take are caller responsibilities.
 
-```json
-"wholeTransactionEvidence": {
-  "purpose": "Fuel-only purchase established from the transaction record and specific context",
-  "verified": true
-}
-```
+The adapter validates matching answer IDs/types, probability bounds/coverage/sums, Choice selection, Score levels and weighted result, Noul range, and token usage. It permits normal distribution/score rounding without modifying values. Invalid provider responses become generic MCP errors. The response body is capped at 1 MiB and bounded JSON depth/nodes; no raw input, provider error bodies or credentials are logged.
 
-This optional object belongs inside the target transaction. `purpose` is 1–500 characters; `verified` is an explicit caller attestation that the supplied evidence establishes this transaction's purpose. Merely observing that previous trips were usually groceries does not justify asserting it. Do not fabricate `itemEvidence` or verified purpose to bypass review. Amazon/AMZN, Target, Costco and Walmart/WM/Wal-Mart with no item evidence or established whole-transaction purpose are forced to insufficient information, even at maximum confidence. General free-text context/history informs Jev, but does not independently waive this deterministic review safeguard. Missing receipts alone do not block non-mixed transactions or specifically evidenced whole transactions.
+### Migration from the finance-specific tools
 
-Each result retains `id`, `outcome`, `categoryId`, `jevChoice`, `confidence`, `probabilities`, `reviewRequired` and `reviewFlags`, and adds `automaticSubmissionEligible`. Response metadata includes `serviceVersion: "0.2.0"`, `policyVersion: "2"`, requested/returned model, unchanged concentration semantics, and `automaticSubmissionThreshold: 0.85`. No explanatory prose is invented.
+This intentionally replaces `suggest_transaction_categories`; it is no longer listed and calls to that name return an unknown-tool error before inference. The short-lived 0.2.0 transaction/history/receipt/0.85-policy interface is removed. There is no compatibility wrapper carrying finance rules into the general service. Move relevant data into `state`, express the decision in `questions`, then interpret returned values in the caller workflow. The original finance implementation and the 0.2.0 commit remain in Git history; they were not rewritten away.
 
-Automatic eligibility requires explicit opt-in, an explicit workflow target, a valid category, **confidence strictly greater than 0.85**, and no blocker. Exactly 0.85 stays review-required; scores are never rounded and the selected option's probability is not the threshold value. Confidence measures distribution concentration, **not calibrated probability of correctness**, receipt verification or arithmetic correctness. Every ineligible result has `reviewRequired: true`; an eligible result has `reviewRequired: false` and empty review flags. Bruh may submit only eligible results under the approved workflow and must recheck exact row/item identity before writing. The MCP itself never submits anything.
+MCP transport remains stateless Streamable HTTP with JSON responses, versions 2025-06-18 and 2025-03-26. Send JSON content type, `Accept: application/json, text/event-stream` and the negotiated `MCP-Protocol-Version` on subsequent requests. Initialize advertises service 0.3.0. GET/DELETE on `/mcp` return 405; no SSE/session state or transaction persistence is added.
 
-Review flags include `human_review_required`, `concentration_not_above_threshold`, `insufficient_information`, `automation_target_required`, `automation_target_evidence_mismatch`, `mixed_merchant_without_purpose_evidence`, `receipt_line_item_evidence_missing`, `receipt_verification_required`, `invalid_receipt_evidence`, and `invalid_whole_transaction_evidence`. The legacy `low_concentration` (<0.8) and `mixed_merchant_without_item_evidence` flags remain available for compatibility. Invalid evidence, missing line-item evidence, ambiguity or the model's insufficient-information outcome suppresses category output. Missing receipt verification can retain a suggestion for review but never grants eligibility. Upstream invalid distributions/timeouts remain sanitized MCP tool errors, with no suggestions.
-
-Embedded transaction text, history and category definitions remain untrusted data. History is background, not proof of this purchase's purpose; receipts and verification are never inferred from concentration. Jev credentials, OAuth permissions, session behavior, throttling and infrastructure are unchanged.
-
-### Publishing and the first live pass
-
-This code change must be published and deployed before the connected tool sees the new fields. The operator should use the existing workload SSO session and `npm run deploy:lambdas` to publish the Lambda bundle and update the live alias after code review; this update does not require Terraform apply, new credentials or OAuth scope changes. Refresh/reconnect the MCP client's tool discovery if it caches schemas. Verify initialize advertises 0.2.0 and tools/list includes `allowAutomaticSubmission`, `recentTransactions` and transaction evidence/history fields before submitting the first real batch. Calls against an older deployment reject these new fields or retain the old mandatory-review policy. No deployment or real-data call was performed for this change.
+Existing OAuth identity, audience, expiry, scope and membership checks are preserved. The existing scope string **`transactions:suggest` is retained as a legacy authorization identifier** to avoid changing grants or credentials in this update; it now gates `evaluate_state`. It is not a transaction input schema or a newly provisioned permission. The service has no Sheets/email connection or budget-write capability.
 
 ## Authentication
 
@@ -125,15 +100,16 @@ Canonical resource uses API Gateway's trusted `requestContext.apiId` and Lambda'
 
 Infrastructure pins Family-PaaS `a59d41e0469d1a1336110fa2d6e46ee07f2eb168`. The runtime role can read the exact Jev secret, sign/get-public-key on the OAuth KMS key, read/write/delete authorization codes, and write its own log streams. The password hash is an environment variable (not recoverable as the password). The Jev API key never enters Terraform state or outputs. Jev key retrieval is lazy, cached for 5 minutes, with a 3-second timeout and one attempt.
 
-Jev calls use a fixed HTTPS endpoint, 12-second timeout, response-size/schema/distribution validation, no redirects and **zero retries** to avoid duplicate charges after uncertain failures. Lambda timeout is 25 seconds. API stage throttling is 1 request/second, burst 2. AWS throttling is best effort, not a monthly spending cap or per-user quota. Disable access logging here and never log event bodies, headers, tokens, transaction text, secret values or upstream error bodies. The application emits no request logs. API errors are generic. Caller-supplied content is transmitted to TypeSafe AI only on an authorized tool call; assess provider retention separately before real use.
+Jev calls use the fixed `https://api.typesafe.ai/v1/systemone` endpoint, 12-second timeout, response-size/schema validation, no redirects and **zero retries** to avoid duplicate charges after uncertain failures. Lambda timeout is 25 seconds. API stage throttling is 1 request/second, burst 2. AWS throttling is best effort, not a monthly spending cap or per-user quota. Disable access logging here and never log event bodies, headers, tokens, transaction text, secret values or upstream error bodies. The application emits no request logs. API errors are generic. Caller-supplied content is transmitted to TypeSafe AI only on an authorized tool call; assess provider retention separately before real use.
 
-## Offline evaluation
+## Publication and rollout
 
-`npm run evaluate -- <local-file.json>` reads only saved predictions paired with later user-confirmed labels. See `test/evaluation.synthetic.json` for the schema. It reports coverage, abstentions and exact-label agreement overall and by concentration band, plus model/policy versions. Synthetic results prove mechanics only, not model accuracy. Keep actual labels in ignored `evaluation-private/` and do not commit them. Use a separate held-out set, preserve taxonomy version in evaluation records, deduplicate recurring merchants across train/test splits, compare model/policy versions, inspect ambiguous merchants and per-category errors, and report sample sizes before adjusting thresholds. Review remains required for ineligible results. Evaluate the >0.85 eligible subset separately for wrong automatic submissions and abstention rates before broad use; confidence bands are concentration bands, not measured accuracy. Running evaluation never invokes Jev.
+The earlier 0.2.0 update was published to fork main as `ed04929` before the general-interface clarification arrived. This 0.3.0 change follows it as a separate commit, preserving that history. The current verification report is [docs/general-inference-verification.md](docs/general-inference-verification.md); older reports describe historical implementations.
 
-## Verified contracts
+After publishing/reviewing this update, an authorized operator uses the existing workload SSO/profile and ignored app configuration to run `npm run deploy:lambdas`. No Terraform apply, OAuth expansion or credential changes are needed for this code-only update. Refresh the client's cached tool discovery and confirm initialize reports 0.3.0 and tools/list advertises only `evaluate_state` before the first real inference call. Publication does not imply the connected service is updated. No deployment or paid inference was performed during development.
 
-Reviewed September 30, 2026:
-- [Jev introduction](https://docs.typesafe.ai/introduction), [Choice](https://docs.typesafe.ai/primitives/choice), [API](https://docs.typesafe.ai/api), [confidence](https://docs.typesafe.ai/confidence): fixed `/v1/systemone`, Bearer API key, `state/model/questions`, Choice criteria map, `answers` with choice/confidence/probabilities and returned model. `jev-latest` can change; select a supported pinned model after evaluation when reproducibility matters.
-- [MCP HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) and [authorization](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization).
-- [OpenAI MCP authentication](https://developers.openai.com/plugins/build/auth): provider discovery, resource binding, PKCE and client registration are necessary beyond JWT verification.
+## Verified upstream contracts
+
+Reviewed September 30, 2026: [TypeSafe API](https://docs.typesafe.ai/api), [Choice](https://docs.typesafe.ai/primitives/choice), [Score](https://docs.typesafe.ai/primitives/score), [Noul](https://docs.typesafe.ai/primitives/noul), [models](https://docs.typesafe.ai/models), and [confidence](https://docs.typesafe.ai/confidence). Input is text or structured JSON; images/receipts require caller preprocessing. The adapter has been documentation-verified and mock-tested, not exercised against live Jev.
+
+[MCP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) and [OpenAI authentication](https://developers.openai.com/plugins/build/auth) remain the protocol references. Offline evaluations belong with caller policy and user-confirmed labels; the finance-specific evaluation script and fixtures are removed from this general inference service.

@@ -1,0 +1,6 @@
+- [x] Verify actual official Jev schemas and prior push status.
+- [x] Replace specialized policy with bounded general inference for all primitives.
+- [x] Preserve authentication, secrets, fixed endpoint and safe failures.
+- [x] Remove specialized runtime/tests/evaluation and document migration.
+- [x] Complete verification and follow-up commit/publish to fork main.
+- [ ] Separately authorized review and Lambda rollout.

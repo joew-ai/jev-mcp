@@ -1,4 +1,6 @@
-# Daily-workflow update verification
+# Historical daily-workflow update verification
+
+Superseded by the 0.3.0 general interface. See [general-inference-verification.md](general-inference-verification.md). This report records the previous implementation, whose commit is preserved in history.
 
 Based on synchronized upstream `69a7e80` (`fix oauth server`). No AGENTS.md or local skills exist in the checkout or mounted `.agents` directory. OAuth server, KMS/DynamoDB authorization-code storage, credentials, IAM permissions and deployment configuration are preserved. Inference remains stateless with no transaction storage, sheet/email access or category writes.
 

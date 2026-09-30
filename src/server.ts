@@ -3,8 +3,7 @@ import type {
   APIGatewayProxyStructuredResultV2,
 } from "aws-lambda";
 import { z } from "zod";
-import { inputSchema, MAX_REQUEST_BYTES, suggest } from "./domain.js";
-import type { ChoiceClient } from "./jev.js";
+import { inputSchema, MAX_REQUEST_BYTES, type JevClient } from "./jev.js";
 import { AuthorizationError, SCOPE, type AuthConfig } from "./auth.js";
 import {
   authorizationServerMetadata,
@@ -43,7 +42,7 @@ function fromOAuth(result: OAuthResult): APIGatewayProxyStructuredResultV2 {
 export function createHandler(
   config: AuthConfig,
   verify: (token: string) => Promise<void>,
-  client: ChoiceClient,
+  client: JevClient,
   oauth?: OAuthConfig,
 ) {
   return async (
@@ -197,7 +196,7 @@ export function createHandler(
             ? params!.protocolVersion
             : versions[0],
           capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: "jev-mcp", version: "0.2.0" },
+          serverInfo: { name: "jev-mcp", version: "0.3.0" },
         },
       });
     }
@@ -209,9 +208,9 @@ export function createHandler(
         result: {
           tools: [
             {
-              name: "suggest_transaction_categories",
+              name: "evaluate_state",
               description:
-                "Suggest categories for exact transactions or receipt line items using Jev. Optional bounded history is background, with null labels meaning unknown. Sends descriptions, evidence, history and category definitions to TypeSafe AI. No spreadsheet access or writes. Defaults to human review. Explicitly opt in with allowAutomaticSubmission and target to receive automaticSubmissionEligible only above 0.85 confidence with no blockers. Confidence is distribution concentration, not accuracy or receipt verification; caller must verify receipt matches, split arithmetic, and exact target identity before submission.",
+                "Evaluate arbitrary caller-supplied JSON/text state using Jev Choice, Score or Noul questions. Pass instructions and criteria in the documented Jev schema; optionally override the deployed model. Sends this content to TypeSafe AI and returns its answers, model and usage unchanged. Confidence on Choice/Score measures distribution concentration, not calibrated correctness; Noul returns noul without invented confidence. No caller workflow decisions, data writes or external URL fetching. Limit: 20 questions, 255 Choice options, 2–10 Score levels, 512 KiB request. Existing OAuth authorization is required.",
               inputSchema: z.toJSONSchema(inputSchema),
               annotations: {
                 readOnlyHint: true,
@@ -225,12 +224,12 @@ export function createHandler(
         },
       });
     if (rpc !== "tools/call") return error(id, -32601, "Method not found");
-    if (params?.name !== "suggest_transaction_categories")
+    if (params?.name !== "evaluate_state")
       return error(id, -32602, "Unknown tool");
     const input = inputSchema.safeParse(params.arguments);
     if (!input.success) return error(id, -32602, "Invalid tool arguments");
     try {
-      const result = await suggest(input.data, client);
+      const result = await client.evaluate(input.data);
       return reply(200, {
         jsonrpc: "2.0",
         id,
@@ -249,7 +248,7 @@ export function createHandler(
           content: [
             {
               type: "text",
-              text: "Inference unavailable. No category suggestions produced.",
+              text: "Inference unavailable. No results produced.",
             },
           ],
         },
