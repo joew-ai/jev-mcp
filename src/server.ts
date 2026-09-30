@@ -3,7 +3,7 @@ import type {
   APIGatewayProxyStructuredResultV2,
 } from "aws-lambda";
 import { z } from "zod";
-import { inputSchema, suggest } from "./domain.js";
+import { inputSchema, MAX_REQUEST_BYTES, suggest } from "./domain.js";
 import type { ChoiceClient } from "./jev.js";
 import { AuthorizationError, SCOPE, type AuthConfig } from "./auth.js";
 import {
@@ -148,10 +148,10 @@ export function createHandler(
       !headers.accept.includes("text/event-stream")
     )
       return reply(406, { error: "Accept JSON and event-stream required" });
-    if ((event.body?.length || 0) > 90000)
+    if ((event.body?.length || 0) > 4 * Math.ceil(MAX_REQUEST_BYTES / 3))
       return reply(413, { error: "Request too large" });
     const body = decodeBody(event);
-    if (Buffer.byteLength(body) > 65536)
+    if (Buffer.byteLength(body) > MAX_REQUEST_BYTES)
       return reply(413, { error: "Request too large" });
     const error = (id: string | number | null, code: number, message: string) =>
       reply(200, { jsonrpc: "2.0", id, error: { code, message } });
@@ -197,7 +197,7 @@ export function createHandler(
             ? params!.protocolVersion
             : versions[0],
           capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: "jev-mcp", version: "0.1.0" },
+          serverInfo: { name: "jev-mcp", version: "0.2.0" },
         },
       });
     }
@@ -211,7 +211,7 @@ export function createHandler(
             {
               name: "suggest_transaction_categories",
               description:
-                "Suggest categories for human review using Jev. Sends supplied descriptions and category definitions to TypeSafe AI. No spreadsheet access or writes. Confidence is distribution concentration, not accuracy. Provide only necessary context; all results require review.",
+                "Suggest categories for exact transactions or receipt line items using Jev. Optional bounded history is background, with null labels meaning unknown. Sends descriptions, evidence, history and category definitions to TypeSafe AI. No spreadsheet access or writes. Defaults to human review. Explicitly opt in with allowAutomaticSubmission and target to receive automaticSubmissionEligible only above 0.85 confidence with no blockers. Confidence is distribution concentration, not accuracy or receipt verification; caller must verify receipt matches, split arithmetic, and exact target identity before submission.",
               inputSchema: z.toJSONSchema(inputSchema),
               annotations: {
                 readOnlyHint: true,

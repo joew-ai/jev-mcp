@@ -1,6 +1,6 @@
 # jev-mcp
 
-Review-only transaction category suggestions on Family-PaaS Lambda + HTTP API Gateway. Bruh reads Tiller rows/categories using its existing Google Drive connection, sends only necessary descriptions and category definitions here, and presents suggestions for confirmation. This service has no Sheets access, Google credentials, budget writes, persistence, or arbitrary URL tool.
+Transaction category suggestions on Family-PaaS Lambda + HTTP API Gateway, with review-only defaults and explicit opt-in eligibility for automatic submission. Bruh reads Tiller rows/categories using its existing Google Drive connection and submits eligible results itself. This service has no Sheets access, Google credentials, budget writes, transaction persistence, or arbitrary URL tool. Existing OAuth authorization-code storage is unchanged.
 
 ## Local verification
 
@@ -32,11 +32,70 @@ The only tool is `suggest_transaction_categories`:
 }
 ```
 
-Transactions may include `context` (500 characters) and `itemEvidence` (1000 characters). Descriptions are limited to 500 characters, opaque IDs to 80 ASCII letters/digits/underscore/hyphen. Maximum batch: 10 transactions; maximum categories: 50, each with a 500-character definition. IDs must be unique within each list. Inputs reject extra fields and requests exceed 64 KiB are rejected. Do not include account numbers, balances, full spreadsheet rows, unnecessary dates, or credentials. IDs never go to Jev; category IDs and definitions do.
+Transactions may include `context` (now 4000 characters) and `itemEvidence` (1000 characters). Descriptions remain limited to 500 characters, opaque IDs to 80 ASCII letters/digits/underscore/hyphen, batches to 10 targets, and categories to 50 definitions of 500 characters each. Category IDs remain safe aliases; Bruh maps them back to the exact Tiller labels, including spaces and punctuation. Supply only submit-ready budget categories, excluding Categorize Later/unknown placeholders, and map those history labels to `null`. Inputs reject extra fields. The decoded request limit is now 512 KiB, including JSON-RPC framing; both raw and base64-encoded requests are bounded. Avoid account numbers, balances, credentials and unnecessary spreadsheet columns.
 
-Each result includes `categoryId` or an `insufficient_information` outcome, original `jevChoice`, `confidence`, full `probabilities`, `reviewRequired`, and policy-generated `reviewFlags`. Response metadata includes requested/returned model, service version and policy version. No explanation is invented. Confidence measures distribution concentration, **not calibrated correctness**. The 0.8 low-concentration flag is an initial review heuristic, not an accuracy guarantee. Every result needs human review.
+### Daily-workflow contract (service 0.2.0, policy 2)
 
-Amazon/AMZN, Target and Costco descriptions without nonempty caller-supplied item evidence are forced to insufficient information regardless of confidence. Evidence presence is not evidence verification; fabricated or vague evidence and other mixed retailers still require human review. Embedded transaction instructions remain untrusted, scoped data; constrained output validation and review policy apply independently of the model.
+All new fields are optional. An existing request still returns suggestions requiring human review. To enable submission eligibility, pass `allowAutomaticSubmission: true` and set each target's `target` to `categorize_later` or `receipt_line_item`. These are caller assertions about the exact row or item being processed; the service cannot inspect the sheet to verify them. Opaque target IDs must map to the exact row or receipt item. Only exact Categorize Later rows and caller-verified receipt items are authorized workflow targets.
+
+```json
+{
+  "allowAutomaticSubmission": true,
+  "categories": [
+    {"id": "fuel", "definition": "Exact Tiller label: Auto: Fuel & Gas"},
+    {"id": "food", "definition": "Exact Tiller label: Food & Dining"}
+  ],
+  "recentTransactions": [
+    {"transactionId": "prior-1", "description": "Synthetic coffee shop", "categoryId": "food", "amount": -4.5},
+    {"transactionId": "prior-2", "description": "Synthetic unknown purchase", "categoryId": null}
+  ],
+  "transactions": [
+    {
+      "id": "current-1",
+      "target": "categorize_later",
+      "description": "COSTCO GAS #123",
+      "context": "Synthetic whole-transaction example; no receipt is available.",
+      "sameMerchantTransactions": [
+        {"transactionId": "prior-3", "description": "COSTCO GAS #123", "categoryId": "fuel"}
+      ]
+    },
+    {
+      "id": "receipt-item-1",
+      "target": "receipt_line_item",
+      "description": "Synthetic Walmart purchase",
+      "itemEvidence": "Coffee beans, exact verified receipt line item",
+      "receiptVerification": {"matchesTransaction": true, "splitArithmeticVerified": true}
+    }
+  ]
+}
+```
+
+`recentTransactions` holds up to 20 actual recent transactions, shared across the batch. `sameMerchantTransactions` holds up to 10 prior transactions for each target's merchant. Each history entry requires `transactionId`, `description` (1–400 characters), and `categoryId` (a supplied alias or `null` for unknown); `amount` is optional and bounded to ±1 billion. Use `null` for uncategorized/Categorize Later labels rather than inventing a category. IDs are unique within each history list, must exclude **all current batch targets**, and are stripped before calling Jev. Overlap between recent and same-merchant lists is permitted; those repeated examples are not independent evidence. The caller selects the true recent ordering and verifies same-merchant identity; the server cannot fetch or verify sheet history. Up to 30 context slots per target are supported without flattening histories across merchants.
+
+With line items available, set `target: "receipt_line_item"` and supply the exact `itemEvidence`. The caller must verify receipt-to-transaction matching and the entire split's arithmetic, including tax, shipping and adjustments, before asserting both receipt verification booleans. Each item gets its own opaque ID. The service does not perform receipt lookup, matching, amount reconciliation, splitting, or spreadsheet updates. An item mistakenly tagged `categorize_later` remains review-required. Legacy `itemEvidence` without verification still produces review-only suggestions.
+
+Without line items, categorize the whole transaction. A specific dedicated fuel descriptor (for example `COSTCO GAS #123` or `Walmart Fuel 123`) establishes whole-transaction purpose without a receipt. For other purposes or a generic merchant descriptor, the caller can supply:
+
+```json
+"wholeTransactionEvidence": {
+  "purpose": "Fuel-only purchase established from the transaction record and specific context",
+  "verified": true
+}
+```
+
+This optional object belongs inside the target transaction. `purpose` is 1–500 characters; `verified` is an explicit caller attestation that the supplied evidence establishes this transaction's purpose. Merely observing that previous trips were usually groceries does not justify asserting it. Do not fabricate `itemEvidence` or verified purpose to bypass review. Amazon/AMZN, Target, Costco and Walmart/WM/Wal-Mart with no item evidence or established whole-transaction purpose are forced to insufficient information, even at maximum confidence. General free-text context/history informs Jev, but does not independently waive this deterministic review safeguard. Missing receipts alone do not block non-mixed transactions or specifically evidenced whole transactions.
+
+Each result retains `id`, `outcome`, `categoryId`, `jevChoice`, `confidence`, `probabilities`, `reviewRequired` and `reviewFlags`, and adds `automaticSubmissionEligible`. Response metadata includes `serviceVersion: "0.2.0"`, `policyVersion: "2"`, requested/returned model, unchanged concentration semantics, and `automaticSubmissionThreshold: 0.85`. No explanatory prose is invented.
+
+Automatic eligibility requires explicit opt-in, an explicit workflow target, a valid category, **confidence strictly greater than 0.85**, and no blocker. Exactly 0.85 stays review-required; scores are never rounded and the selected option's probability is not the threshold value. Confidence measures distribution concentration, **not calibrated probability of correctness**, receipt verification or arithmetic correctness. Every ineligible result has `reviewRequired: true`; an eligible result has `reviewRequired: false` and empty review flags. Bruh may submit only eligible results under the approved workflow and must recheck exact row/item identity before writing. The MCP itself never submits anything.
+
+Review flags include `human_review_required`, `concentration_not_above_threshold`, `insufficient_information`, `automation_target_required`, `automation_target_evidence_mismatch`, `mixed_merchant_without_purpose_evidence`, `receipt_line_item_evidence_missing`, `receipt_verification_required`, `invalid_receipt_evidence`, and `invalid_whole_transaction_evidence`. The legacy `low_concentration` (<0.8) and `mixed_merchant_without_item_evidence` flags remain available for compatibility. Invalid evidence, missing line-item evidence, ambiguity or the model's insufficient-information outcome suppresses category output. Missing receipt verification can retain a suggestion for review but never grants eligibility. Upstream invalid distributions/timeouts remain sanitized MCP tool errors, with no suggestions.
+
+Embedded transaction text, history and category definitions remain untrusted data. History is background, not proof of this purchase's purpose; receipts and verification are never inferred from concentration. Jev credentials, OAuth permissions, session behavior, throttling and infrastructure are unchanged.
+
+### Publishing and the first live pass
+
+This code change must be published and deployed before the connected tool sees the new fields. The operator should use the existing workload SSO session and `npm run deploy:lambdas` to publish the Lambda bundle and update the live alias after code review; this update does not require Terraform apply, new credentials or OAuth scope changes. Refresh/reconnect the MCP client's tool discovery if it caches schemas. Verify initialize advertises 0.2.0 and tools/list includes `allowAutomaticSubmission`, `recentTransactions` and transaction evidence/history fields before submitting the first real batch. Calls against an older deployment reject these new fields or retain the old mandatory-review policy. No deployment or real-data call was performed for this change.
 
 ## Authentication
 
@@ -70,7 +129,7 @@ Jev calls use a fixed HTTPS endpoint, 12-second timeout, response-size/schema/di
 
 ## Offline evaluation
 
-`npm run evaluate -- <local-file.json>` reads only saved predictions paired with later user-confirmed labels. See `test/evaluation.synthetic.json` for the schema. It reports coverage, abstentions and exact-label agreement overall and by concentration band, plus model/policy versions. Synthetic results prove mechanics only, not model accuracy. Keep actual labels in ignored `evaluation-private/` and do not commit them. Use a separate held-out set, preserve taxonomy version in evaluation records, deduplicate recurring merchants across train/test splits, compare model/policy versions, inspect ambiguous merchants and per-category errors, and report sample sizes before adjusting thresholds. Human review remains required. Running evaluation never invokes Jev.
+`npm run evaluate -- <local-file.json>` reads only saved predictions paired with later user-confirmed labels. See `test/evaluation.synthetic.json` for the schema. It reports coverage, abstentions and exact-label agreement overall and by concentration band, plus model/policy versions. Synthetic results prove mechanics only, not model accuracy. Keep actual labels in ignored `evaluation-private/` and do not commit them. Use a separate held-out set, preserve taxonomy version in evaluation records, deduplicate recurring merchants across train/test splits, compare model/policy versions, inspect ambiguous merchants and per-category errors, and report sample sizes before adjusting thresholds. Review remains required for ineligible results. Evaluate the >0.85 eligible subset separately for wrong automatic submissions and abstention rates before broad use; confidence bands are concentration bands, not measured accuracy. Running evaluation never invokes Jev.
 
 ## Verified contracts
 

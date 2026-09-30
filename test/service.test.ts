@@ -335,7 +335,7 @@ test("transport and invalid requests cannot reach inference", async () => {
       400,
     ],
     [{ ...event(null), body: "{" }, 400],
-    [{ ...event(null), body: "x".repeat(65537) }, 413],
+    [{ ...event(null), body: "x".repeat(524289) }, 413],
   ] as const)
     assert.equal((await h(e)).statusCode, status);
   for (const request of [
