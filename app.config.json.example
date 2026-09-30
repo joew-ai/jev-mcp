@@ -10,18 +10,13 @@
     "statePrefix": "",
     "stateRoleArn": "arn:aws:iam::"
   },
-  "lambdas": [
-    "mcp"
-  ],
+  "lambdas": ["mcp"],
   "frontend": {
     "buildCommand": "false",
     "distDir": "dist/frontend"
   },
   "esbuild": {
     "target": "node20",
-    "external": [
-      "aws-sdk",
-      "aws-lambda"
-    ]
+    "external": ["aws-sdk", "aws-lambda"]
   }
 }
