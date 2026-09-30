@@ -1,0 +1,6 @@
+workload_account_id = "111122223333"
+oauth_issuer = "https://issuer.example.com/"
+oauth_jwks_url = "https://issuer.example.com/.well-known/jwks.json"
+allowed_subjects = ["REPLACE_WITH_AUTHORIZED_SUBJECT"]
+allowed_origins = []
+jev_secret_arn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:jev-api-key-ABCDEF"

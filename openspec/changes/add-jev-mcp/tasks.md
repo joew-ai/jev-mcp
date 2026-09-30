@@ -1,0 +1,7 @@
+- [x] Inspect platform, verify external contracts and scope before implementation.
+- [x] Implement bounded Choice adapter and independent review policy.
+- [x] Implement stateless MCP, resource metadata and JWT membership validation.
+- [x] Integrate pinned Family-PaaS modules and exact-ARN runtime secrets.
+- [x] Add synthetic protocol/auth/policy/failure tests and offline evaluation.
+- [x] Document provider, secret and deployment setup without deploying.
+- [ ] Operator: populate secret, configure OAuth/client, deploy and verify real connection.
