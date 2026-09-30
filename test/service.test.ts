@@ -32,6 +32,57 @@ test('auth protects tools and initialization; metadata alone is public',async()=
   }
   const r=await handler(event(null,{authorization:''},'GET','/.well-known/oauth-protected-resource/mcp'));assert.equal(body(r).resource,config.resource);
 });
+test('challenge discovers only path-specific resource metadata without auth or inference',async()=>{
+  let verifications=0;let calls=0;
+  const h=createHandler(config,async()=>{verifications++;throw new Error();},{model:'mock',evaluate:async()=>{calls++;return answer;}});
+  const denied=await h(event(rpc('tools/list'),{authorization:''}));
+  assert.equal(denied.statusCode,401);
+  const challenge=String(denied.headers?.['www-authenticate']);
+  const metadataUrl=new URL(/resource_metadata="([^"]+)"/.exec(challenge)![1]);
+  assert.equal(metadataUrl.href,'https://mcp.example/.well-known/oauth-protected-resource/mcp');
+  const metadata=await h(event(null,{authorization:''},'GET',metadataUrl.pathname));
+  assert.equal(metadata.statusCode,200);
+  assert.deepEqual(body(metadata),{resource:config.resource,authorization_servers:[config.issuer],scopes_supported:['transactions:suggest'],bearer_methods_supported:['header']});
+  const wrongMethod=await h(event(null,{authorization:''},'POST',metadataUrl.pathname));
+  assert.equal(wrongMethod.statusCode,405);assert.equal(wrongMethod.headers?.allow,'GET');
+  assert.equal((await h(event(null,{authorization:''},'GET','/.well-known/oauth-protected-resource'))).statusCode,404);
+  assert.equal(verifications,0);assert.equal(calls,0);
+});
+test('handler distinguishes invalid credentials from insufficient scope and membership before inference',async()=>{
+  const {privateKey,publicKey}=await generateKeyPair('RS256');
+  const jwk=await exportJWK(publicKey);
+  const verify=createVerifier(config,createLocalJWKSet({keys:[{...jwk,kid:'handler-test',alg:'RS256'}]}));
+  let calls=0;
+  const h=createHandler(config,verify,{model:'mock',evaluate:async()=>{calls++;return answer;}});
+  async function token(overrides:Record<string,unknown>={}) {
+    return new SignJWT({iss:config.issuer,aud:config.resource,sub:'member',scope:'transactions:suggest',iat:Math.floor(Date.now()/1000),exp:Math.floor(Date.now()/1000)+300,...overrides}).setProtectedHeader({alg:'RS256',kid:'handler-test'}).sign(privateKey);
+  }
+  const cases:[string,number,boolean][]=[
+    ['',401,false],['invalid',401,false],
+    [await token({exp:1,scope:'openid',sub:'outsider'}),401,false],
+    [await token({iss:'https://evil/'}),401,false],
+    [await token({aud:'wrong'}),401,false],
+    [await token({exp:undefined}),401,false],
+    [await token({nbf:Math.floor(Date.now()/1000)+500}),401,false],
+    [await token({token_use:'id',scope:'openid'}),401,false],
+    [await token({sub:''}),401,false],
+    [await token({scope:'openid'}),403,true],
+    [await token({scope:undefined}),403,true],
+    [await token({scope:'transactions:suggest:extra'}),403,true],
+    [await token({sub:'outsider'}),403,false],
+  ];
+  for(const [credential,status,insufficientScope] of cases) {
+    for(const request of [rpc('initialize',{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'test',version:'1'}}),rpc('tools/list'),rpc('tools/call',{name:'suggest_transaction_categories',arguments:input})]) {
+      const r=await h(event(request,{authorization:credential ? `Bearer ${credential}` : ''}));
+      assert.equal(r.statusCode,status);assert.deepEqual(body(r),{error:status === 401 ? 'Unauthorized' : 'Forbidden'});
+      if(status === 401 || insufficientScope) assert.match(String(r.headers?.['www-authenticate']),/resource_metadata="https:\/\/mcp.example\/\.well-known\/oauth-protected-resource\/mcp"/);
+      if(insufficientScope) assert.match(String(r.headers?.['www-authenticate']),/error="insufficient_scope"/);
+    }
+  }
+  assert.equal(calls,0);
+  const valid=await h(event(rpc('tools/call',{name:'suggest_transaction_categories',arguments:input}),{authorization:`Bearer ${await token({scope:'openid transactions:suggest'})}`}));
+  assert.equal(valid.statusCode,200);assert.equal(body(valid).result.isError,false);assert.equal(calls,1);
+});
 test('transport and invalid requests cannot reach inference',async()=>{
   let calls=0; const h=createHandler(config,async()=>{}, {model:'mock',evaluate:async()=>{calls++;return answer;}});
   for (const [e,status] of [

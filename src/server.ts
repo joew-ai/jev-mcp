@@ -2,7 +2,7 @@ import type { APIGatewayProxyEventV2, APIGatewayProxyStructuredResultV2 } from '
 import { z } from 'zod';
 import { inputSchema, suggest } from './domain.js';
 import type { ChoiceClient } from './jev.js';
-import { SCOPE, type AuthConfig } from './auth.js';
+import { AuthorizationError, SCOPE, type AuthConfig } from './auth.js';
 const versions = ['2025-06-18','2025-03-26'];
 const envelope = z.object({jsonrpc:z.literal('2.0'),id:z.union([z.string().max(128),z.number().int()]).optional(),method:z.string(),params:z.record(z.string(),z.unknown()).optional()});
 export function createHandler(config:AuthConfig, verify:(token:string)=>Promise<void>, client:ChoiceClient) {
@@ -12,7 +12,7 @@ export function createHandler(config:AuthConfig, verify:(token:string)=>Promise<
     const origin = headers.origin;
     if(origin && !config.origins.includes(origin)) return reply(403,{error:'Origin denied'});
     const path = event.rawPath; const method = event.requestContext.http.method;
-    if(path === '/.well-known/oauth-protected-resource' || path === '/.well-known/oauth-protected-resource/mcp') {
+    if(path === '/.well-known/oauth-protected-resource/mcp') {
       return method === 'GET' ? reply(200,{resource:config.resource,authorization_servers:[config.issuer],scopes_supported:[SCOPE],bearer_methods_supported:['header']}) : reply(405,undefined,{allow:'GET'});
     }
     if(path !== '/mcp') return reply(404,{error:'Not found'});
@@ -21,7 +21,10 @@ export function createHandler(config:AuthConfig, verify:(token:string)=>Promise<
       const match = /^Bearer ([^\s,]+)$/i.exec(headers.authorization || '');
       if(!match || match[1].length > 16384) throw new Error();
       await verify(match[1]);
-    } catch { return reply(401,{error:'Unauthorized'},{'www-authenticate':challenge}); }
+    } catch (error) {
+      if(error instanceof AuthorizationError) return reply(403,{error:'Forbidden'},error.reason === 'insufficient_scope' ? {'www-authenticate':`${challenge}, error="insufficient_scope"`} : {});
+      return reply(401,{error:'Unauthorized'},{'www-authenticate':challenge});
+    }
     if(method !== 'POST') return reply(405,undefined,{allow:'POST'});
     if(headers['mcp-protocol-version'] && !versions.includes(headers['mcp-protocol-version'])) return reply(400,{error:'Unsupported protocol version'});
     if(!headers['content-type']?.toLowerCase().startsWith('application/json')) return reply(415,{error:'JSON required'});

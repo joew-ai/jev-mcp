@@ -59,7 +59,7 @@ module "api" {
   enable_access_logging  = false
   # Authentication is enforced in Lambda BEFORE MCP discovery or inference.
   # Gateway JWT errors cannot supply the required RFC 9728 challenge header.
-  routes = [for route in ["ANY /mcp", "GET /.well-known/oauth-protected-resource", "GET /.well-known/oauth-protected-resource/mcp"] : {
+  routes = [for route in ["ANY /mcp", "GET /.well-known/oauth-protected-resource/mcp"] : {
     route_key     = route
     function_arn  = module.mcp.alias_invoke_arn
     function_name = module.mcp.qualified_arn

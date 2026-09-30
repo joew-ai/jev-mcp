@@ -40,7 +40,7 @@ Amazon/AMZN, Target and Costco descriptions without nonempty caller-supplied ite
 
 ## Authentication: manual setup required
 
-The platform defers cross-account Cognito integration. This app does not create an authorization server or OAuth clients. The API module's built-in JWT rejection cannot emit this application's OAuth discovery challenge, so the routes intentionally use Lambda enforcement. All `/mcp` methods, including initialize and tools/list, require verification before protocol handling or inference. Only RFC 9728 protected-resource metadata is public. No fallback API key or unauthenticated paid route exists.
+The platform defers cross-account Cognito integration. This app does not create an authorization server or OAuth clients. The API module's built-in JWT rejection cannot emit this application's OAuth discovery challenge, so the routes intentionally use Lambda enforcement. All `/mcp` methods, including initialize and tools/list, require verification before protocol handling or inference. Missing, invalid or expired credentials receive 401; valid access tokens lacking the required scope or authorized membership receive 403. Only RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource/mcp` is public. The root well-known path is not exposed because this service's resource identifier includes `/mcp`. No fallback API key or unauthenticated paid route exists.
 
 Configure an existing OAuth provider (separate from Jev):
 
