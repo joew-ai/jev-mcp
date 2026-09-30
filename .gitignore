@@ -16,3 +16,6 @@ account-creation.auto.tfvars.json
 .env*
 !.env.example
 evaluation-private/
+
+app.config.json
+terraform/.terraform.lock.hcl
