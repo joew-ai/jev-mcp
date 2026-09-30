@@ -1,0 +1,27 @@
+{
+  "name": "",
+  "tenantId": "",
+  "workloadAccountId": "",
+  "environment": "prod",
+  "region": "us-east-1",
+  "terraform": {
+    "stateBucket": "",
+    "stateRegion": "us-east-1",
+    "statePrefix": "",
+    "stateRoleArn": "arn:aws:iam::"
+  },
+  "lambdas": [
+    "mcp"
+  ],
+  "frontend": {
+    "buildCommand": "false",
+    "distDir": "dist/frontend"
+  },
+  "esbuild": {
+    "target": "node20",
+    "external": [
+      "aws-sdk",
+      "aws-lambda"
+    ]
+  }
+}

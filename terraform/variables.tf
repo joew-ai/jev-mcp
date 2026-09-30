@@ -17,25 +17,11 @@ variable "environment" {
   type    = string
   default = "prod"
 }
-variable "oauth_issuer" {
-  type = string
-  validation {
-    condition     = can(regex("^https://[^?#]+$", var.oauth_issuer))
-    error_message = "An HTTPS OAuth issuer is required."
-  }
-}
-variable "oauth_jwks_url" {
-  type = string
-  validation {
-    condition     = can(regex("^https://[^?#]+$", var.oauth_jwks_url))
-    error_message = "An HTTPS provider JWKS URL is required."
-  }
-}
 variable "allowed_subjects" {
   type = list(string)
   validation {
-    condition     = length(var.allowed_subjects) > 0 && alltrue([for s in var.allowed_subjects : length(s) > 0])
-    error_message = "Explicit authorized OAuth subject IDs are required."
+    condition     = length(var.allowed_subjects) > 0 && alltrue([for s in var.allowed_subjects : length(s) > 0 && length(s) <= 128])
+    error_message = "Explicit authorized usernames are required."
   }
 }
 variable "allowed_origins" {
@@ -44,6 +30,15 @@ variable "allowed_origins" {
   validation {
     condition     = alltrue([for o in var.allowed_origins : can(regex("^https://[^/]+$", o))])
     error_message = "Use explicit HTTPS origins; no wildcard."
+  }
+}
+variable "oauth_password_hash" {
+  description = "SHA-256 hex digest of the single operator login password. Generate with: printf '%s' 'password' | shasum -a 256"
+  type        = string
+  sensitive   = true
+  validation {
+    condition     = can(regex("^[0-9a-f]{64}$", var.oauth_password_hash))
+    error_message = "Supply a 64-character lowercase SHA-256 hex digest."
   }
 }
 variable "jev_secret_arn" {

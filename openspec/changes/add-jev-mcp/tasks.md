@@ -4,4 +4,4 @@
 - [x] Integrate pinned Family-PaaS modules and exact-ARN runtime secrets.
 - [x] Add synthetic protocol/auth/policy/failure tests and offline evaluation.
 - [x] Document provider, secret and deployment setup without deploying.
-- [ ] Operator: populate secret, configure OAuth/client, deploy and verify real connection.
+- [ ] Operator: populate Jev secret, set password hash and subjects, deploy and complete ChatGPT login.

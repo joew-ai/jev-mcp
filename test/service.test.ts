@@ -6,7 +6,7 @@ import { createJevClient, type ChoiceClient } from '../src/jev.js';
 import { createVerifier, type AuthConfig } from '../src/auth.js';
 import { inputSchema, suggest } from '../src/domain.js';
 import { generateKeyPair, exportJWK, createLocalJWKSet, SignJWT } from 'jose';
-const config:AuthConfig = {issuer:'https://issuer.example/',resource:'https://mcp.example/mcp',jwksUrl:'https://issuer.example/keys',subjects:['member'],origins:['https://chatgpt.com']};
+const config:AuthConfig = {issuer:'https://issuer.example/',resource:'https://mcp.example/mcp',subjects:['member'],origins:['https://chatgpt.com']};
 const input = {transactions:[{id:'opaque1',description:'Synthetic coffee shop'}],categories:[{id:'food',definition:'Food purchases'}]};
 const answer = {model:'jev-1.13.0',answers:{t0:{type:'choice' as const,choice:'food',confidence:0.99,probabilities:{food:0.99,insufficient_information:0.01}}}};
 function event(body:unknown, headers:Record<string,string>={}, method='POST', path='/mcp'):APIGatewayProxyEventV2 {

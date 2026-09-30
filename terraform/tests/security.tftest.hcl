@@ -5,20 +5,27 @@ mock_provider "aws" {
 }
 variables {
   workload_account_id = "111122223333"
-  oauth_issuer        = "https://issuer.example/"
-  oauth_jwks_url      = "https://issuer.example/keys"
   allowed_subjects    = ["member"]
+  oauth_password_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   jev_secret_arn      = "arn:aws:secretsmanager:us-east-1:111122223333:secret:jev-ABCDEF"
 }
 run "security_configuration" {
   command = plan
   assert {
-    condition     = jsondecode(aws_iam_role_policy.runtime.policy).Statement[0].Resource == var.jev_secret_arn
-    error_message = "Secret permission must be restricted to the exact ARN."
+    condition     = aws_kms_key.oauth.key_usage == "SIGN_VERIFY"
+    error_message = "OAuth key must be a signing key."
   }
   assert {
-    condition     = length(jsondecode(aws_iam_role_policy.runtime.policy).Statement) == 2
-    error_message = "Default role must only read its secret and write its own logs."
+    condition     = aws_kms_key.oauth.customer_master_key_spec == "RSA_2048"
+    error_message = "OAuth key must be RSA 2048."
+  }
+  assert {
+    condition     = aws_dynamodb_table.oauth_codes.hash_key == "pk"
+    error_message = "Authorization codes use a single partition key."
+  }
+  assert {
+    condition     = aws_dynamodb_table.oauth_codes.ttl[0].enabled
+    error_message = "Authorization codes must expire via TTL."
   }
 }
 run "reject_cross_account_secret" {
@@ -34,4 +41,11 @@ run "reject_empty_membership" {
     allowed_subjects = []
   }
   expect_failures = [var.allowed_subjects]
+}
+run "reject_invalid_password_hash" {
+  command = plan
+  variables {
+    oauth_password_hash = "not-a-hash"
+  }
+  expect_failures = [var.oauth_password_hash]
 }
