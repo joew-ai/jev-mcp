@@ -154,29 +154,21 @@ function redirectWith(
 async function allowedClient(
   clientId: string,
   redirect: string,
-  fetcher: typeof fetch,
 ): Promise<boolean> {
   if (clientId === CHATGPT_CIMD && redirect === CHATGPT_REDIRECT) return true;
-  if (
-    !clientId.startsWith("https://chatgpt.com/oauth/") ||
-    !clientId.endsWith("/client.json")
-  ) {
-    return false;
-  }
 
-  try {
-    const response = await fetcher(clientId, {
-      redirect: "error",
-      signal: AbortSignal.timeout(3000),
-    });
-    if (!response.ok) return false;
-    const meta = (await response.json()) as { redirect_uris?: unknown };
-    return (
-      Array.isArray(meta.redirect_uris) && meta.redirect_uris.includes(redirect)
-    );
-  } catch {
-    return false;
-  }
+  // Callback-specific ChatGPT clients bind the same opaque callback ID into
+  // both URLs. Matching them locally avoids depending on an outbound fetch
+  // during the interactive authorization request.
+  const clientMatch = /^https:\/\/chatgpt\.com\/oauth\/([^/]+)\/client\.json$/.exec(
+    clientId,
+  );
+  const redirectMatch = /^https:\/\/chatgpt\.com\/connector\/oauth\/([^/]+)$/.exec(
+    redirect,
+  );
+  return Boolean(
+    clientMatch && redirectMatch && clientMatch[1] === redirectMatch[1],
+  );
 }
 
 export function authorizeForm(params: URLSearchParams): OAuthResult {
@@ -248,7 +240,7 @@ export async function handleAuthorize(
   if (resource !== config.resource || !scope.split(/\s+/).includes(SCOPE)) {
     return errorPage("Invalid resource or scope");
   }
-  if (!(await allowedClient(clientId, redirect, config.fetch || fetch))) {
+  if (!(await allowedClient(clientId, redirect))) {
     return errorPage("Unknown client");
   }
   if (method === "GET") return authorizeForm(params);

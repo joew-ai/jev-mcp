@@ -197,6 +197,24 @@ test("challenge discovers only path-specific resource metadata without auth or i
   assert.equal(verifications, 0);
   assert.equal(calls, 0);
 });
+
+test("public OAuth discovery ignores browser Origin while MCP still enforces it", async () => {
+  const handler = createHandler(config, async () => {}, client);
+  const publicResponse = await handler(
+    event(
+      undefined,
+      { origin: "https://oauth.client.example" },
+      "GET",
+      "/.well-known/oauth-protected-resource/mcp",
+    ),
+  );
+  assert.equal(publicResponse.statusCode, 200);
+
+  const mcpResponse = await handler(
+    event(rpc("ping"), { origin: "https://oauth.client.example" }),
+  );
+  assert.equal(mcpResponse.statusCode, 403);
+});
 test("handler distinguishes invalid credentials from insufficient scope and membership before inference", async () => {
   const { privateKey, publicKey } = await generateKeyPair("RS256");
   const jwk = await exportJWK(publicKey);

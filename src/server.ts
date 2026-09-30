@@ -65,9 +65,6 @@ export function createHandler(
       },
       body: body === undefined ? "" : JSON.stringify(body),
     });
-    const origin = headers.origin;
-    if (origin && !config.origins.includes(origin))
-      return reply(403, { error: "Origin denied" });
     const path = event.rawPath;
     const method = event.requestContext.http.method;
     if (path === "/.well-known/oauth-protected-resource/mcp") {
@@ -115,6 +112,9 @@ export function createHandler(
       }
     }
     if (path !== "/mcp") return reply(404, { error: "Not found" });
+    const origin = headers.origin;
+    if (origin && !config.origins.includes(origin))
+      return reply(403, { error: "Origin denied" });
     const challenge = `Bearer resource_metadata="${new URL(config.resource).origin}/.well-known/oauth-protected-resource/mcp", scope="${SCOPE}"`;
     try {
       const match = /^Bearer ([^\s,]+)$/i.exec(headers.authorization || "");

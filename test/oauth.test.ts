@@ -165,6 +165,34 @@ test("authorize rejects unknown clients, wrong password, and outsider usernames"
   assert.equal(outsider.statusCode, 400);
 });
 
+test("authorize accepts a matched callback-specific ChatGPT client", async () => {
+  const { config } = await signerConfig();
+  const callbackId = "callback-123";
+  const response = await handleAuthorize(
+    "GET",
+    authorizeQuery({
+      client_id: `https://chatgpt.com/oauth/${callbackId}/client.json`,
+      redirect_uri: `https://chatgpt.com/connector/oauth/${callbackId}`,
+    }),
+    "",
+    undefined,
+    config,
+  );
+  assert.equal(response.statusCode, 200);
+
+  const mismatched = await handleAuthorize(
+    "GET",
+    authorizeQuery({
+      client_id: `https://chatgpt.com/oauth/${callbackId}/client.json`,
+      redirect_uri: "https://chatgpt.com/connector/oauth/different",
+    }),
+    "",
+    undefined,
+    config,
+  );
+  assert.equal(mismatched.statusCode, 400);
+});
+
 test("token exchange consumes the code, checks PKCE, and issues a resource-bound JWT", async () => {
   const { config, store, jwk } = await signerConfig();
   const { verifier, challenge: codeChallenge } = challenge();
