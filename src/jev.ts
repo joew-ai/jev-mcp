@@ -1,5 +1,10 @@
-import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
+import {
+  InferenceError,
+  type InferenceDiagnostic,
+  validatedStatus,
+  validOpaqueId,
+} from "./diagnostics.js";
 
 export const MAX_REQUEST_BYTES = 512 * 1024;
 export const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -102,105 +107,21 @@ export const inputSchema = z.strictObject({
 });
 export type JevRequest = z.infer<typeof inputSchema>;
 
-const probability = z.number().min(0).max(1);
-const distribution = z.record(z.string(), probability);
-const answerSchema = z.discriminatedUnion("type", [
-  z.looseObject({
-    type: z.literal("choice"),
-    choice: z.string(),
-    confidence: probability,
-    probabilities: distribution,
-  }),
-  z.looseObject({
-    type: z.literal("score"),
-    score: z.number(),
-    confidence: probability,
-    probabilities: distribution,
-    legend: z.record(z.string(), content),
-  }),
-  z.looseObject({ type: z.literal("noul"), noul: probability }),
-]);
-const responseSchema = z.looseObject({
-  model: z.string().min(1).max(100),
-  answers: z.record(z.string(), answerSchema),
-  usage: z.looseObject({
-    input_tokens: z.number().int().nonnegative(),
-    output_tokens: z.number().int().nonnegative(),
-  }),
-});
-export type JevResponse = z.infer<typeof responseSchema>;
+// Provider JSON is untrusted data, not a validated set of Jev answers.
+export type JevResponse = unknown;
 export interface JevClient {
   model: string;
   evaluate(request: JevRequest): Promise<JevResponse>;
 }
 
-function validDistribution(
-  probabilities: Record<string, number>,
-  keys: string[],
-) {
-  return (
-    Object.keys(probabilities).length === keys.length &&
-    keys.every((key) => Object.hasOwn(probabilities, key)) &&
-    Math.abs(
-      Object.values(probabilities).reduce((sum, value) => sum + value, 0) - 1,
-    ) <= 0.001
-  );
-}
-
-function validateResponse(raw: unknown, request: JevRequest): JevResponse {
-  if (!boundedJson(raw)) throw new Error();
-  const response = responseSchema.parse(raw);
-  if (
-    Object.keys(response.answers).length !==
-    Object.keys(request.questions).length
-  )
-    throw new Error();
-  for (const [id, question] of Object.entries(request.questions)) {
-    if (!Object.hasOwn(response.answers, id)) throw new Error();
-    const answer = response.answers[id];
-    if (answer.type !== question.type) throw new Error();
-    if (question.type === "choice" && answer.type === "choice") {
-      const keys = Object.keys(question.criteria);
-      if (
-        !keys.includes(answer.choice) ||
-        !validDistribution(answer.probabilities, keys) ||
-        answer.probabilities[answer.choice] <
-          Math.max(...Object.values(answer.probabilities))
-      )
-        throw new Error();
-    }
-    if (question.type === "score" && answer.type === "score") {
-      const keys = question.criteria.map((_, index) => String(index));
-      if (
-        !validDistribution(answer.probabilities, keys) ||
-        Object.keys(answer.legend).length !== keys.length ||
-        keys.some((key) => !Object.hasOwn(answer.legend, key))
-      )
-        throw new Error();
-      // Legends echo the requested levels. Compare JSON values rather than
-      // serialized text so object property order does not affect equality.
-      if (
-        keys.some(
-          (key, index) =>
-            !isDeepStrictEqual(answer.legend[key], question.criteria[index]),
-        )
-      )
-        throw new Error();
-      const mean = keys.reduce(
-        (sum, key) => sum + Number(key) * answer.probabilities[key],
-        0,
-      );
-      // Allow normal rounding of a weighted score, without altering its value.
-      if (
-        answer.score < 0 ||
-        answer.score > keys.length - 1 ||
-        Math.abs(answer.score - mean) > 0.01
-      )
-        throw new Error();
-    }
+/** Bounded successful HTTP content that cannot be exposed as structured JSON. */
+export class ProviderContentError extends InferenceError {
+  constructor(
+    readonly providerText: string,
+    diagnostic: InferenceDiagnostic,
+  ) {
+    super(diagnostic);
   }
-  // Validate without projecting fields or inventing confidence/explanations.
-  return raw as JevResponse;
 }
 
 export function createJevClient(
@@ -211,22 +132,42 @@ export function createJevClient(
   return {
     model,
     async evaluate(request) {
+      let diagnostic: InferenceDiagnostic = { category: "internal" };
+      let signal: AbortSignal | undefined;
       try {
         // Validate before secret reads or paid calls, including direct client use.
-        const input = inputSchema.parse({
+        const inputResult = inputSchema.safeParse({
           ...request,
           model: request.model ?? model,
         });
+        if (!inputResult.success) {
+          diagnostic = {
+            category: "request_validation",
+            validationReason: "request_schema",
+          };
+          throw new Error();
+        }
+        const input = inputResult.data;
         const body = JSON.stringify(input);
-        if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new Error();
-        // Match legends against the JSON actually sent, including JSON's
-        // normalization of negative zero and object prototypes.
-        const sentInput = JSON.parse(body) as JevRequest;
-        const key = await getKey();
+        if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) {
+          diagnostic = {
+            category: "request_validation",
+            validationReason: "request_size",
+          };
+          throw new Error();
+        }
+        let key: string;
+        try {
+          key = await getKey();
+        } catch {
+          diagnostic = { category: "credentials" };
+          throw new Error();
+        }
+        signal = AbortSignal.timeout(12000);
         const response = await fetcher("https://api.typesafe.ai/v1/systemone", {
           method: "POST",
           redirect: "error",
-          signal: AbortSignal.timeout(12000),
+          signal,
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${key}`,
@@ -234,7 +175,34 @@ export function createJevClient(
           body,
         });
         // No retries: a timed-out request may already have incurred a charge.
-        if (!response.ok || !response.body) throw new Error();
+        if (!response.ok) {
+          diagnostic = {
+            category: "upstream_http",
+            upstreamStatus: validatedStatus(response.status),
+          };
+          const upstreamId =
+            response.headers.get("x-request-id") ??
+            response.headers.get("request-id");
+          if (
+            validOpaqueId(upstreamId) &&
+            (!key || (!key.includes(upstreamId) && !upstreamId.includes(key)))
+          )
+            diagnostic.upstreamRequestId = upstreamId;
+          throw new Error();
+        }
+        const upstreamId =
+          response.headers.get("x-request-id") ??
+          response.headers.get("request-id");
+        if (
+          validOpaqueId(upstreamId) &&
+          (!key || (!key.includes(upstreamId) && !upstreamId.includes(key)))
+        )
+          diagnostic.upstreamRequestId = upstreamId;
+        diagnostic.upstreamStatus = validatedStatus(response.status);
+        if (!response.body) {
+          diagnostic = { ...diagnostic, category: "response_json" };
+          throw new Error();
+        }
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let text = "";
@@ -244,15 +212,51 @@ export function createJevClient(
             const { done, value } = await reader.read();
             if (done) break;
             size += value.length;
-            if (size > MAX_RESPONSE_BYTES) throw new Error();
+            if (size > MAX_RESPONSE_BYTES) {
+              diagnostic = { ...diagnostic, category: "response_size" };
+              throw new Error();
+            }
             text += decoder.decode(value, { stream: true });
           }
         } finally {
           await reader.cancel();
         }
-        return validateResponse(JSON.parse(text + decoder.decode()), sentInput);
-      } catch {
-        throw new Error("Inference unavailable");
+        const providerText = text + decoder.decode();
+        let raw: unknown;
+        try {
+          raw = JSON.parse(providerText);
+        } catch {
+          throw new ProviderContentError(providerText, {
+            ...diagnostic,
+            category: "response_json",
+          });
+        }
+        // These are serialization/resource limits, not answer semantics. Keep
+        // the raw body available when JSON cannot safely be serialized again.
+        if (!boundedJson(raw)) {
+          throw new ProviderContentError(providerText, {
+            ...diagnostic,
+            category: "response_validation",
+            validationReason: "response_content",
+          });
+        }
+        return raw;
+      } catch (error) {
+        if (error instanceof ProviderContentError) throw error;
+        if (error instanceof InferenceError) {
+          throw new InferenceError({ ...diagnostic, ...error.diagnostic });
+        }
+        if (diagnostic.category === "internal") {
+          const timedOut =
+            signal?.aborted ||
+            (error instanceof Error &&
+              (error.name === "TimeoutError" || error.name === "AbortError"));
+          diagnostic = {
+            ...diagnostic,
+            category: timedOut ? "timeout" : signal ? "network" : "internal",
+          };
+        }
+        throw new InferenceError(diagnostic);
       }
     },
   };

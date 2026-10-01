@@ -13,7 +13,10 @@ function required(name: string) {
   return value;
 }
 
-export const handlerEntry: APIGatewayProxyHandlerV2 = async (event) => {
+export const handlerEntry: APIGatewayProxyHandlerV2 = async (
+  event,
+  context,
+) => {
   try {
     if (!handler) {
       const apiId = event.requestContext.apiId;
@@ -62,9 +65,10 @@ export const handlerEntry: APIGatewayProxyHandlerV2 = async (event) => {
           putCode: store.putCode,
           takeCode: store.takeCode,
         },
+        (entry) => console.error(JSON.stringify(entry)),
       );
     }
-    return await handler(event);
+    return await handler(event, { lambdaRequestId: context.awsRequestId });
   } catch {
     return {
       statusCode: 503,

@@ -283,7 +283,7 @@ test("upstream errors are generic MCP tool errors, without input or token leakag
   );
   assert.equal(r.result.isError, true);
   assert.ok(!JSON.stringify(r).includes("private"));
-  assert.ok(!r.result.structuredContent);
+  assert.equal(r.result.structuredContent.diagnostic.category, "internal");
 });
 
 test("signed-token expiry, issuer, audience, scope and membership remain enforced before inference", async () => {
@@ -356,4 +356,21 @@ test("signed-token expiry, issuer, audience, scope and membership remain enforce
   );
   assert.equal(body(r).result.isError, false);
   assert.equal(calls, 1);
+});
+
+test("MCP returns arrays and scalar provider JSON as text without fabricated structured objects", async () => {
+  for (const raw of [null, false, 42, "provider text", [{ partial: true }]]) {
+    const h = createHandler(config, async () => {}, {
+      model: "mock",
+      evaluate: async () => raw,
+    });
+    const result = body(
+      await h(
+        event(rpc("tools/call", { name: "evaluate_state", arguments: input })),
+      ),
+    ).result;
+    assert.equal(result.isError, false);
+    assert.deepEqual(JSON.parse(result.content[0].text), raw);
+    assert.equal(Object.hasOwn(result, "structuredContent"), false);
+  }
 });
