@@ -55,7 +55,11 @@ const response = {
       type: "score",
       score: 1.25,
       confidence: 0.5,
-      legend: { "0": "Low", "1": "Medium", "2": "High" },
+      legend: {
+        "0": "Low",
+        "1": { level: "Medium", examples: ["Damage"] },
+        "2": ["High", "No workaround"],
+      },
       probabilities: { "0": 0, "1": 0.75, "2": 0.25 },
     },
     urgent: { type: "noul", noul: 0.8 },
@@ -126,6 +130,76 @@ test("general request, fallback/override model and complete response are preserv
     assert.ok(!Object.hasOwn(result, "reviewRequired"));
     assert.ok(!Object.hasOwn(result, "automaticSubmissionEligible"));
     assert.equal(calls, 1);
+  }
+});
+
+test("Score legends preserve structured levels and match criteria independent of object key order", async () => {
+  const raw = copy();
+  raw.answers.severity.legend["1"] = {
+    examples: ["Damage"],
+    level: "Medium",
+  };
+  const client = createJevClient(
+    "jev-latest",
+    async () => "synthetic",
+    async () => Response.json(raw),
+  );
+  assert.deepEqual(await client.evaluate(request), raw);
+});
+
+test("Score legends reject swapped strings, reordered arrays and altered nested levels", async () => {
+  const cases = [
+    {
+      criteria: ["Low", "High"],
+      legend: { "0": "High", "1": "Low" },
+    },
+    {
+      criteria: [{ level: "Low" }, { level: "High" }],
+      legend: { "0": { level: "High" }, "1": { level: "Low" } },
+    },
+    {
+      criteria: ["Low", ["High", "No workaround"]],
+      legend: { "0": "Low", "1": ["No workaround", "High"] },
+    },
+    {
+      criteria: ["Low", { level: "High", examples: ["Blocked"] }],
+      legend: { "0": "Low", "1": { level: "High", examples: ["Altered"] } },
+    },
+    { criteria: ["Low", "High"], legend: { "0": "Low", "1": null } },
+  ];
+  for (const { criteria, legend } of cases) {
+    const client = createJevClient(
+      "jev-latest",
+      async () => "synthetic",
+      async () =>
+        Response.json({
+          model: "jev-1.13.0",
+          answers: {
+            severity: {
+              type: "score",
+              score: 0.75,
+              confidence: 0.5,
+              probabilities: { "0": 0.25, "1": 0.75 },
+              legend,
+            },
+          },
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }),
+    );
+    await assert.rejects(
+      () =>
+        client.evaluate({
+          state: "Synthetic report",
+          questions: {
+            severity: {
+              type: "score",
+              instructions: "Rate severity",
+              criteria,
+            },
+          },
+        }),
+      /^Error: Inference unavailable$/,
+    );
   }
 });
 

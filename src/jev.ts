@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 
 export const MAX_REQUEST_BYTES = 512 * 1024;
@@ -115,7 +116,7 @@ const answerSchema = z.discriminatedUnion("type", [
     score: z.number(),
     confidence: probability,
     probabilities: distribution,
-    legend: z.record(z.string(), z.string()),
+    legend: z.record(z.string(), content),
   }),
   z.looseObject({ type: z.literal("noul"), noul: probability }),
 ]);
@@ -174,6 +175,15 @@ function validateResponse(raw: unknown, request: JevRequest): JevResponse {
         !validDistribution(answer.probabilities, keys) ||
         Object.keys(answer.legend).length !== keys.length ||
         keys.some((key) => !Object.hasOwn(answer.legend, key))
+      )
+        throw new Error();
+      // Legends echo the requested levels. Compare JSON values rather than
+      // serialized text so object property order does not affect equality.
+      if (
+        keys.some(
+          (key, index) =>
+            !isDeepStrictEqual(answer.legend[key], question.criteria[index]),
+        )
       )
         throw new Error();
       const mean = keys.reduce(
