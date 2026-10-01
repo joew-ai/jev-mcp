@@ -5,6 +5,7 @@ import {
   inputSchema,
   MAX_RESPONSE_BYTES,
   MAX_REQUEST_BYTES,
+  ProviderContentError,
   type JevRequest,
 } from "../src/jev.js";
 
@@ -125,15 +126,14 @@ test("general request, fallback/override model and complete response are preserv
       ...(override ? { model: override } : {}),
     });
     assert.deepEqual(result, raw);
-    assert.equal(result.answers["Which team?"].confidence, 0.85);
-    assert.ok(!Object.hasOwn(result.answers.urgent, "confidence"));
+    assert.ok(result !== null && typeof result === "object");
     assert.ok(!Object.hasOwn(result, "reviewRequired"));
     assert.ok(!Object.hasOwn(result, "automaticSubmissionEligible"));
     assert.equal(calls, 1);
   }
 });
 
-test("Score legends preserve structured levels and match criteria independent of object key order", async () => {
+test("Score legends preserve structured levels and provider object key order", async () => {
   const raw = copy();
   raw.answers.severity.legend["1"] = {
     examples: ["Damage"],
@@ -147,7 +147,7 @@ test("Score legends preserve structured levels and match criteria independent of
   assert.deepEqual(await client.evaluate(request), raw);
 });
 
-test("Score legends match JSON-normalized negative zero in the outbound request", async () => {
+test("outbound JSON normalizes negative zero without mutating caller input", async () => {
   const criteria = [{ value: -0 }, { value: 1 }];
   const raw = {
     model: "jev-1.13.0",
@@ -185,7 +185,7 @@ test("Score legends match JSON-normalized negative zero in the outbound request"
   assert.equal(Object.is(criteria[0].value, -0), true);
 });
 
-test("Score legends reject swapped strings, reordered arrays and altered nested levels", async () => {
+test("Score legends preserve swapped strings, reordered arrays and altered nested levels", async () => {
   const cases = [
     {
       criteria: ["Low", "High"],
@@ -224,20 +224,29 @@ test("Score legends reject swapped strings, reordered arrays and altered nested 
           usage: { input_tokens: 10, output_tokens: 5 },
         }),
     );
-    await assert.rejects(
-      () =>
-        client.evaluate({
-          state: "Synthetic report",
-          questions: {
-            severity: {
-              type: "score",
-              instructions: "Rate severity",
-              criteria,
-            },
-          },
-        }),
-      /^Error: Inference unavailable$/,
-    );
+    const result = await client.evaluate({
+      state: "Synthetic report",
+      questions: {
+        severity: {
+          type: "score",
+          instructions: "Rate severity",
+          criteria,
+        },
+      },
+    });
+    assert.deepEqual(result, {
+      model: "jev-1.13.0",
+      answers: {
+        severity: {
+          type: "score",
+          score: 0.75,
+          confidence: 0.5,
+          probabilities: { "0": 0.25, "1": 0.75 },
+          legend,
+        },
+      },
+      usage: { input_tokens: 10, output_tokens: 5 },
+    });
   }
 });
 
@@ -405,50 +414,50 @@ test("invalid client input and oversized state do not read secrets or incur infe
   assert.equal(calls, 0);
 });
 
-test("response validation checks matching types/keys, probabilities, score and usage", async () => {
-  const invalid: unknown[] = [];
+test("provider semantics pass through without repairing answers, probabilities, confidence or usage", async () => {
+  const outputs: unknown[] = [];
   let r = copy();
   delete (r.answers as Partial<typeof r.answers>).urgent;
-  invalid.push(r);
+  outputs.push(r);
   r = copy();
   r.answers["Which team?"].choice = "Missing option";
-  invalid.push(r);
+  outputs.push(r);
   r = copy();
   r.answers["Which team?"].probabilities.Other = 0.5;
-  invalid.push(r);
+  outputs.push(r);
   r = copy();
   r.answers["Which team?"].probabilities = {
     "Customer Support": 1,
   } as (typeof r.answers)["Which team?"]["probabilities"];
-  invalid.push(r);
+  outputs.push(r);
   r = copy();
   r.answers["Which team?"].confidence = 1.1;
-  invalid.push(r);
+  outputs.push(r);
   r = copy();
   r.answers["Which team?"].probabilities = {
     "Customer Support": 0.1,
     Other: 0.9,
   };
-  invalid.push(r);
+  outputs.push(r);
   r = copy();
   r.answers.severity.score = 1.9;
-  invalid.push(r);
+  outputs.push(r);
   r = copy();
   r.answers.severity.legend = {
     "0": "Low",
   } as typeof r.answers.severity.legend;
-  invalid.push(r);
+  outputs.push(r);
   r = copy();
   r.answers.severity.probabilities["0"] = -0.1;
-  invalid.push(r);
+  outputs.push(r);
   r = copy();
   r.answers.urgent.noul = 2;
-  invalid.push(r);
+  outputs.push(r);
   r = copy();
   r.usage.input_tokens = -1;
-  invalid.push(r);
-  invalid.push({ ...response, usage: undefined });
-  invalid.push({
+  outputs.push(r);
+  outputs.push({ ...response, usage: undefined });
+  outputs.push({
     ...response,
     answers: {
       ...response.answers,
@@ -461,19 +470,25 @@ test("response validation checks matching types/keys, probabilities, score and u
       },
     },
   });
-  invalid.push({
+  outputs.push({
     ...response,
     answers: { ...response.answers, extra: { type: "noul", noul: 0 } },
   });
-  for (const raw of invalid) {
+  r = copy();
+  r.answers["Which team?"].probabilities.Other = 0.055;
+  outputs.push(r); // Rounded distribution sums to 1.005, beyond the old tolerance.
+  outputs.push({ answers: { partial: { confidence: "uncertain" } }, extra: true });
+  outputs.push({ answers: { partial: { type: "new-primitive", value: "raw" } } });
+  outputs.push({});
+  for (const raw of outputs) {
     const client = createJevClient(
       "jev-latest",
       async () => "synthetic",
       async () => Response.json(raw),
     );
-    await assert.rejects(
-      () => client.evaluate(request),
-      /^Error: Inference unavailable$/,
+    assert.deepEqual(
+      await client.evaluate(request),
+      JSON.parse(JSON.stringify(raw)),
     );
   }
 });
@@ -520,4 +535,74 @@ test("zero retries, deadline, response byte cap and sanitized failures remain in
     /^Error: Inference unavailable$/,
   );
   assert.equal(calls, 0);
+});
+
+test("nonstandard top-level JSON is preserved without claiming typed answers", async () => {
+  for (const raw of [
+    null,
+    true,
+    42,
+    "provider text",
+    [response, { partial: true }],
+  ]) {
+    const client = createJevClient(
+      "jev-latest",
+      async () => "synthetic",
+      async () => Response.json(raw),
+    );
+    assert.deepEqual(await client.evaluate(request), raw);
+  }
+});
+
+test("malformed successful provider content remains available without JSON repair", async () => {
+  for (const raw of [
+    '{"answers": {"team": "Support",}}',
+    "plain provider output",
+    "",
+  ]) {
+    let calls = 0;
+    const client = createJevClient(
+      "jev-latest",
+      async () => "synthetic",
+      async () => {
+        calls++;
+        return new Response(raw, { headers: { "x-request-id": "req_opaque_42" } });
+      },
+    );
+    await assert.rejects(() => client.evaluate(request), (error: unknown) => {
+      assert.ok(error instanceof ProviderContentError);
+      assert.equal(error.providerText, raw);
+      assert.deepEqual(error.diagnostic, {
+        category: "response_json",
+        upstreamStatus: 200,
+        upstreamRequestId: "req_opaque_42",
+      });
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+test("JSON beyond serialization limits remains raw instead of being truncated or normalized", async () => {
+  let deep: unknown = "leaf";
+  for (let i = 0; i < 40; i++) deep = { inner: deep };
+  for (const raw of [
+    JSON.stringify(deep),
+    JSON.stringify(Array(20001).fill(null)),
+    '{"probability":1e999}',
+  ]) {
+    const client = createJevClient(
+      "jev-latest",
+      async () => "synthetic",
+      async () => new Response(raw),
+    );
+    await assert.rejects(() => client.evaluate(request), (error: unknown) => {
+      assert.ok(error instanceof ProviderContentError);
+      assert.equal(error.providerText, raw);
+      assert.equal(error.diagnostic.category, "response_validation");
+      assert.equal(error.diagnostic.validationReason, "response_content");
+      assert.equal(error.diagnostic.upstreamStatus, 200);
+      return true;
+    });
+  }
 });

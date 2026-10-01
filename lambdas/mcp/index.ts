@@ -1,6 +1,7 @@
 import type { APIGatewayProxyHandlerV2 } from "aws-lambda";
 import { createVerifier, type AuthConfig } from "../../src/auth.js";
 import { dynamoCodeStore, kmsSigner } from "../../src/crypto.js";
+import { dynamoRefreshStore } from "../../src/refresh-store.js";
 import { createJevClient } from "../../src/jev.js";
 import { secretLoader } from "../../src/secret.js";
 import { createHandler } from "../../src/server.js";
@@ -13,7 +14,10 @@ function required(name: string) {
   return value;
 }
 
-export const handlerEntry: APIGatewayProxyHandlerV2 = async (event) => {
+export const handlerEntry: APIGatewayProxyHandlerV2 = async (
+  event,
+  context,
+) => {
   try {
     if (!handler) {
       const apiId = event.requestContext.apiId;
@@ -59,12 +63,14 @@ export const handlerEntry: APIGatewayProxyHandlerV2 = async (event) => {
           kid: required("OAUTH_KMS_KEY_ID"),
           sign: (input) => signer.sign(input),
           publicJwk: () => signer.publicJwk(),
+          refresh: dynamoRefreshStore(required("OAUTH_CODE_TABLE")),
           putCode: store.putCode,
           takeCode: store.takeCode,
         },
+        (entry) => console.error(JSON.stringify(entry)),
       );
     }
-    return await handler(event);
+    return await handler(event, { lambdaRequestId: context.awsRequestId });
   } catch {
     return {
       statusCode: 503,

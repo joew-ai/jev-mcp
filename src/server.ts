@@ -3,12 +3,26 @@ import type {
   APIGatewayProxyStructuredResultV2,
 } from "aws-lambda";
 import { z } from "zod";
-import { inputSchema, MAX_REQUEST_BYTES, type JevClient } from "./jev.js";
+import { randomUUID } from "node:crypto";
+import {
+  safeDiagnostic,
+  validCorrelationId,
+  validatedStatus,
+  validOpaqueId,
+  type InferenceDiagnostic,
+} from "./diagnostics.js";
+import {
+  inputSchema,
+  MAX_REQUEST_BYTES,
+  ProviderContentError,
+  type JevClient,
+} from "./jev.js";
 import { AuthorizationError, SCOPE, type AuthConfig } from "./auth.js";
 import {
   authorizationServerMetadata,
   handleAuthorize,
   handleToken,
+  handleRevoke,
   publicJwks,
   type OAuthConfig,
   type OAuthResult,
@@ -44,9 +58,11 @@ export function createHandler(
   verify: (token: string) => Promise<void>,
   client: JevClient,
   oauth?: OAuthConfig,
+  diagnosticSink: (entry: Record<string, string | number>) => void = () => {},
 ) {
   return async (
     event: APIGatewayProxyEventV2,
+    context?: { lambdaRequestId?: string },
   ): Promise<APIGatewayProxyStructuredResultV2> => {
     const headers = Object.fromEntries(
       Object.entries(event.headers).map(([k, v]) => [k.toLowerCase(), v]),
@@ -98,10 +114,10 @@ export function createHandler(
           ),
         );
       }
-      if (path === "/token") {
+      if (path === "/token" || path === "/revoke") {
         return method === "POST"
           ? fromOAuth(
-              await handleToken(
+              await (path === "/revoke" ? handleRevoke : handleToken)(
                 decodeBody(event),
                 headers["content-type"],
                 oauth,
@@ -210,7 +226,7 @@ export function createHandler(
             {
               name: "evaluate_state",
               description:
-                "Evaluate arbitrary caller-supplied JSON/text state using Jev Choice, Score or Noul questions. Pass instructions and criteria in the documented Jev schema; optionally override the deployed model. Sends this content to TypeSafe AI and returns its answers, model and usage unchanged. Confidence on Choice/Score measures distribution concentration, not calibrated correctness; Noul returns noul without invented confidence. No caller workflow decisions, data writes or external URL fetching. Limit: 20 questions, 255 Choice options, 2–10 Score levels, 512 KiB request. Existing OAuth authorization is required.",
+                "Evaluate arbitrary caller-supplied JSON/text state using Jev Choice, Score or Noul questions. Pass instructions and criteria in the documented Jev schema; optionally override the deployed model. Sends this content to TypeSafe AI and returns provider JSON unchanged without validating answers, confidence or probabilities. Non-JSON output is explicitly labeled raw text. Confidence on Choice/Score measures distribution concentration, not calibrated correctness; Noul returns noul without invented confidence. No caller workflow decisions, data writes or external URL fetching. Limit: 20 questions, 255 Choice options, 2–10 Score levels, 512 KiB request. Existing OAuth authorization is required.",
               inputSchema: z.toJSONSchema(inputSchema),
               annotations: {
                 readOnlyHint: true,
@@ -230,26 +246,92 @@ export function createHandler(
     if (!input.success) return error(id, -32602, "Invalid tool arguments");
     try {
       const result = await client.evaluate(input.data);
+      const structured =
+        result !== null && typeof result === "object" && !Array.isArray(result);
       return reply(200, {
         jsonrpc: "2.0",
         id,
         result: {
           content: [{ type: "text", text: JSON.stringify(result) }],
-          structuredContent: result,
+          ...(structured ? { structuredContent: result } : {}),
           isError: false,
         },
       });
-    } catch {
+    } catch (error) {
+      const inferenceDiagnostic = safeDiagnostic(error);
+      const diagnosticId = randomUUID();
+      const safeDiagnosticData: InferenceDiagnostic = {
+        category: inferenceDiagnostic.category,
+        ...(inferenceDiagnostic.validationReason
+          ? { validationReason: inferenceDiagnostic.validationReason }
+          : {}),
+        ...(validatedStatus(inferenceDiagnostic.upstreamStatus) !== undefined
+          ? {
+              upstreamStatus: validatedStatus(
+                inferenceDiagnostic.upstreamStatus,
+              ),
+            }
+          : {}),
+        ...(validOpaqueId(inferenceDiagnostic.upstreamRequestId)
+          ? { upstreamRequestId: inferenceDiagnostic.upstreamRequestId }
+          : {}),
+      };
+      const rawApiGatewayRequestId = event.requestContext.requestId;
+      const rawLambdaRequestId = context?.lambdaRequestId;
+      const apiGatewayRequestId = validCorrelationId(rawApiGatewayRequestId)
+        ? rawApiGatewayRequestId
+        : undefined;
+      const lambdaRequestId = validCorrelationId(rawLambdaRequestId)
+        ? rawLambdaRequestId
+        : undefined;
+      const publicDiagnostic = {
+        diagnosticId,
+        ...safeDiagnosticData,
+        ...(apiGatewayRequestId ? { apiGatewayRequestId } : {}),
+        ...(lambdaRequestId ? { lambdaRequestId } : {}),
+      };
+      const entry: Record<string, string | number> = {
+        event: "inference_failure",
+        diagnosticId,
+        category: safeDiagnosticData.category,
+        ...(safeDiagnosticData.validationReason
+          ? { validationReason: safeDiagnosticData.validationReason }
+          : {}),
+        ...(safeDiagnosticData.upstreamStatus !== undefined
+          ? { upstreamStatus: safeDiagnosticData.upstreamStatus }
+          : {}),
+        ...(safeDiagnosticData.upstreamRequestId
+          ? { upstreamRequestId: safeDiagnosticData.upstreamRequestId }
+          : {}),
+        ...(apiGatewayRequestId ? { apiGatewayRequestId } : {}),
+        ...(lambdaRequestId ? { lambdaRequestId } : {}),
+      };
+      try {
+        diagnosticSink(entry);
+      } catch {
+        // Diagnostics must never change the inference result.
+      }
       return reply(200, {
         jsonrpc: "2.0",
         id,
         result: {
           isError: true,
+          structuredContent: {
+            diagnostic: publicDiagnostic,
+          },
           content: [
             {
               type: "text",
-              text: "Inference unavailable. No results produced.",
+              text:
+                error instanceof ProviderContentError
+                  ? inferenceDiagnostic.category === "response_json"
+                    ? "Jev returned non-JSON content. Raw provider response follows; no typed result is asserted."
+                    : "Jev returned JSON outside the structured-content limits. Raw provider response follows; no typed result is asserted."
+                  : "Inference unavailable. No results produced.",
             },
+            ...(error instanceof ProviderContentError
+              ? [{ type: "text", text: error.providerText }]
+              : []),
           ],
         },
       });

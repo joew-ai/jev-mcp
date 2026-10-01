@@ -46,7 +46,7 @@ The only advertised tool is `evaluate_state`. Its arguments mirror the supported
     "urgent": {
       "type": "noul",
       "instructions": "Is it time-sensitive?",
-      "criteria": {"true": "Urgent", "false": "Can wait"}
+      "criteria": { "true": "Urgent", "false": "Can wait" }
     }
   }
 }
@@ -60,9 +60,9 @@ The only advertised tool is `evaluate_state`. Its arguments mirror the supported
 
 Question IDs, state, instructions, criteria and option names are forwarded as supplied. No system prompt, merchant rule, category alias, history selection, insufficient-information option, confidence threshold, receipt verification or eligibility policy is inserted. Callers include any uncertainty outcome or relevant data themselves. Arbitrary URLs in state are inert text; the server never fetches them. Tool arguments cannot override the HTTP endpoint, headers, method or credentials.
 
-Success returns the **original Jev response** in both MCP `structuredContent` and JSON text content: `model`, `answers`, and `usage`, including any actual additional response fields. Choice returns choice/probabilities/confidence; Score returns score/legend/probabilities/confidence; Noul returns noul. Noul is not given invented confidence. No review or automatic-submission fields are added, and no rationale is generated. Choice/Score confidence measures distribution concentration, not calibrated correctness. Reading the result and deciding what action to take are caller responsibilities.
+Successful HTTP responses containing JSON return the **original provider values**, including any extra fields. JSON objects are returned in both MCP `structuredContent` and JSON text content; arrays, strings, numbers, booleans and null are returned as JSON text without a fabricated structured object. The adapter does not assert that the output matches the requested questions or the documented Jev answer schema. It does not check answer IDs/types, distribution coverage/sums, selected choices, Score legends/results, confidence, Noul values or usage. It never fills missing fields, normalizes probabilities, repairs JSON or invents confidence, explanations, review or submission decisions. Reading the output and applying category/confidence safety checks before a spreadsheet write or any other action are caller responsibilities.
 
-The adapter validates matching answer IDs/types, probability bounds/coverage/sums, Choice selection, Score levels and weighted result, Noul range, and token usage. It permits normal distribution/score rounding without modifying values. Invalid provider responses become generic MCP errors. The response body is capped at 1 MiB and bounded JSON depth/nodes; no raw input, provider error bodies or credentials are logged.
+Response bodies remain capped at 1 MiB. JSON is checked only against structural serialization limits (32 nested levels, 20000 nodes and finite numbers). Bounded non-JSON output or JSON outside those limits is returned as clearly labeled **raw provider text**, with `isError: true` and safe diagnostics; it is not presented as typed successful answers. Non-success HTTP bodies and incomplete/oversized reads are withheld. Failed inference responses include a diagnostic ID, fixed safe category, optional fixed validation reason, upstream HTTP status/request ID, and sanitized API Gateway/Lambda request IDs. Lambda emits one failure-only JSON record with those allowlisted fields; caller content, credentials, provider bodies, raw errors and stacks are excluded from logs. Gateway-generated throttling responses that never invoke Lambda have no application diagnostic.
 
 ### Migration from the finance-specific tools
 
@@ -83,8 +83,11 @@ Public, unauthenticated routes:
 - `GET /.well-known/jwks.json`
 - `GET|POST /authorize`
 - `POST /token`
+- `POST /revoke`
 
-Issuer and resource are `https://{apiId}.execute-api.{region}.amazonaws.com` and that origin plus `/mcp`. Tokens are RS256 via a dedicated KMS key. Authorization codes live in DynamoDB for 120 seconds and are single-use. PKCE S256 is required. ChatGPT's stable CIMD (`https://chatgpt.com/oauth/client.json`) and redirect (`https://chatgpt.com/connector_platform_oauth_redirect`) are allowlisted; callback-id CIMD documents under `https://chatgpt.com/oauth/` are fetched and checked for the requested redirect.
+Issuer and resource are `https://{apiId}.execute-api.{region}.amazonaws.com` and that origin plus `/mcp`. Tokens are RS256 via a dedicated KMS key. Authorization codes live in DynamoDB for 120 seconds and are single-use. PKCE S256 is required. ChatGPT's stable CIMD (`https://chatgpt.com/oauth/client.json`) and redirect (`https://chatgpt.com/connector_platform_oauth_redirect`) are allowlisted; callback-id CIMD URLs under `https://chatgpt.com/oauth/` are matched locally to the same callback ID in the redirect.
+
+Authorization-code exchange also issues a rotating opaque refresh token. Refresh grants expire after 30 days or seven idle days, recheck configured membership, and revoke the entire family on reuse. `/revoke` revokes refresh grants; existing access JWTs expire normally. This rollout requires Terraform IAM/API changes before Lambda deployment; see [refresh security, verification and rollout](docs/oauth-refresh-verification.md).
 
 Set `allowed_subjects` to the username(s) that may sign in. Set `oauth_password_hash` to `printf '%s' 'your-password' | shasum -a 256`. After deploy, paste `mcp_url` into ChatGPT. The first connect opens `/authorize`; sign in with that username and password.
 
@@ -100,13 +103,15 @@ Canonical resource uses API Gateway's trusted `requestContext.apiId` and Lambda'
 
 Infrastructure pins Family-PaaS `a59d41e0469d1a1336110fa2d6e46ee07f2eb168`. The runtime role can read the exact Jev secret, sign/get-public-key on the OAuth KMS key, read/write/delete authorization codes, and write its own log streams. The password hash is an environment variable (not recoverable as the password). The Jev API key never enters Terraform state or outputs. Jev key retrieval is lazy, cached for 5 minutes, with a 3-second timeout and one attempt.
 
-Jev calls use the fixed `https://api.typesafe.ai/v1/systemone` endpoint, 12-second timeout, response-size/schema validation, no redirects and **zero retries** to avoid duplicate charges after uncertain failures. Lambda timeout is 25 seconds. API stage throttling is 1 request/second, burst 2. AWS throttling is best effort, not a monthly spending cap or per-user quota. Disable access logging here and never log event bodies, headers, tokens, transaction text, secret values or upstream error bodies. The application emits no request logs. API errors are generic. Caller-supplied content is transmitted to TypeSafe AI only on an authorized tool call; assess provider retention separately before real use.
+Jev calls use the fixed `https://api.typesafe.ai/v1/systemone` endpoint, 12-second timeout, response-size limits and raw-output handling, no redirects and **zero retries** to avoid duplicate charges after uncertain failures. Lambda timeout is 25 seconds. API stage throttling is 1 request/second, burst 2. AWS throttling is best effort, not a monthly spending cap or per-user quota. Disable access logging here and never log event bodies, headers, tokens, transaction text, secret values or upstream error bodies. The application emits no success/request-content logs; inference failures produce only the allowlisted diagnostic fields described above. API errors are generic. Caller-supplied content is transmitted to TypeSafe AI only on an authorized tool call; assess provider retention separately before real use.
 
 ## Publication and rollout
 
 The earlier 0.2.0 update was published to fork main as `ed04929` before the general-interface clarification arrived. This 0.3.0 change follows it as a separate commit, preserving that history. The current verification report is [docs/general-inference-verification.md](docs/general-inference-verification.md); older reports describe historical implementations.
 
-After publishing/reviewing this update, an authorized operator uses the existing workload SSO/profile and ignored app configuration to run `npm run deploy:lambdas`. No Terraform apply, OAuth expansion or credential changes are needed for this code-only update. Refresh the client's cached tool discovery and confirm initialize reports 0.3.0 and tools/list advertises only `evaluate_state` before the first real inference call. Publication does not imply the connected service is updated. No deployment or paid inference was performed during development.
+The following paragraph describes the earlier 0.3.0 general-inference rollout only. The OAuth refresh update requires the infrastructure-first steps in [the refresh rollout](docs/oauth-refresh-verification.md).
+
+After publishing/reviewing the 0.3.0 general-inference update, an authorized operator uses the existing workload SSO/profile and ignored app configuration to run `npm run deploy:lambdas`. No Terraform apply, OAuth expansion or credential changes are needed for this code-only update. Refresh the client's cached tool discovery and confirm initialize reports 0.3.0 and tools/list advertises only `evaluate_state` before the first real inference call. Publication does not imply the connected service is updated. No deployment or paid inference was performed during development.
 
 ## Verified upstream contracts
 
