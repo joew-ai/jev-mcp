@@ -10,7 +10,6 @@
   "include": [
     "src/**/*.ts",
     "lambdas/**/*.ts",
-    "test/**/*.ts",
-    "scripts/**/*.ts"
+    "test/**/*.ts"
   ]
 }

@@ -1,6 +1,6 @@
 # jev-mcp
 
-Review-only transaction category suggestions on Family-PaaS Lambda + HTTP API Gateway. Bruh reads Tiller rows/categories using its existing Google Drive connection, sends only necessary descriptions and category definitions here, and presents suggestions for confirmation. This service has no Sheets access, Google credentials, budget writes, persistence, or arbitrary URL tool.
+An authenticated, general-purpose MCP interface to Jev. Callers supply their own text/JSON state, typed questions, instructions and criteria. The server forwards supported inference requests to the fixed TypeSafe endpoint and returns the model response faithfully. Receipt preparation, categorization, review rules, thresholds and any downstream actions belong in the caller workflow.
 
 ## Local verification
 
@@ -10,33 +10,67 @@ npm test
 npm run typecheck
 npm run lint
 npm run build
-npm run evaluate -- test/evaluation.synthetic.json
 terraform -chdir=terraform init -backend=false
 terraform -chdir=terraform validate
 terraform -chdir=terraform test
 terraform fmt -check -recursive terraform
 ```
 
-Tests use synthetic data and mocked inference/Secrets Manager; JWT tests use ephemeral test keys. These commands do not call Jev or provision AWS. The Lambda bundle follows the platform's CommonJS `index.handler` convention; the deploy ZIP contains the bundle without this repository's ESM package.json.
+Tests use synthetic state and mocked inference/Secrets Manager. JWT tests use ephemeral test keys. These checks do not call Jev or provision AWS. Lambda packaging follows Family-PaaS's CommonJS `index.handler` convention.
 
-## Tool and policy
+## General inference contract (0.3.0)
 
-`POST /mcp` implements stateless Streamable HTTP JSON responses (2025-06-18 and 2025-03-26). It supports initialize, ping, tools/list, tools/call, and notification acknowledgement. GET/DELETE return 405; no sessions or SSE streams are allocated. Send `Accept: application/json, text/event-stream`, JSON content type, and the negotiated `MCP-Protocol-Version` on subsequent requests.
-
-The only tool is `suggest_transaction_categories`:
+The only advertised tool is `evaluate_state`. Its arguments mirror the supported Jev evaluation request:
 
 ```json
 {
-  "transactions": [{"id":"opaque-1","description":"Synthetic coffee shop"}],
-  "categories": [{"id":"food","definition":"Food and drink purchases"}]
+  "state": {
+    "message": "Synthetic damaged parcel",
+    "context": ["Additional background supplied by the caller"]
+  },
+  "model": "jev-latest",
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Which department handles this?",
+      "criteria": {
+        "Customer Support": "Help with damaged parcels",
+        "Other / unknown": null
+      }
+    },
+    "severity": {
+      "type": "score",
+      "instructions": "Rate the severity.",
+      "criteria": ["Low", "Medium", "High"]
+    },
+    "urgent": {
+      "type": "noul",
+      "instructions": "Is it time-sensitive?",
+      "criteria": {"true": "Urgent", "false": "Can wait"}
+    }
+  }
 }
 ```
 
-Transactions may include `context` (500 characters) and `itemEvidence` (1000 characters). Descriptions are limited to 500 characters, opaque IDs to 80 ASCII letters/digits/underscore/hyphen. Maximum batch: 10 transactions; maximum categories: 50, each with a 500-character definition. IDs must be unique within each list. Inputs reject extra fields and requests exceed 64 KiB are rejected. Do not include account numbers, balances, full spreadsheet rows, unnecessary dates, or credentials. IDs never go to Jev; category IDs and definitions do.
+- `state` is required: a string, JSON object or array. Put arbitrary context/history inside state; there is no separate invented context field, spreadsheet schema or hidden transformation.
+- `model` is optional (1–100 characters). Omission uses the deployed `JEV_MODEL`. Supported aliases include `jev-latest` and `jev-preview`; a supported versioned model can also be selected. Availability is determined by TypeSafe, not by a hard-coded local model list.
+- `questions` is a map of 1–20 named typed questions. Names and Choice labels support spaces/punctuation, up to 128 characters. Prototype-sensitive map keys `__proto__`, `constructor`, and `prototype` are rejected; those keys are still preserved as inert content inside state/instructions.
+- Every question requires `type` and `instructions`. Instructions accept a string, JSON object or array. Choice requires a map of 1–255 criteria, each a string, object, array or null. Score requires an ordered array of 2–10 level descriptions (string, object or array). Noul optionally accepts a criteria object with `true` and/or `false` descriptions.
+- State and structured instruction/criterion values are JSON only, bounded at 32 nested levels and 20000 nodes per content value. A decoded MCP request is capped at 512 KiB; raw and base64 input are both checked. These are service safety limits, not promises that every allowed byte payload fits Jev's token window. Upstream context-window/rate-limit errors return safe tool errors.
 
-Each result includes `categoryId` or an `insufficient_information` outcome, original `jevChoice`, `confidence`, full `probabilities`, `reviewRequired`, and policy-generated `reviewFlags`. Response metadata includes requested/returned model, service version and policy version. No explanation is invented. Confidence measures distribution concentration, **not calibrated correctness**. The 0.8 low-concentration flag is an initial review heuristic, not an accuracy guarantee. Every result needs human review.
+Question IDs, state, instructions, criteria and option names are forwarded as supplied. No system prompt, merchant rule, category alias, history selection, insufficient-information option, confidence threshold, receipt verification or eligibility policy is inserted. Callers include any uncertainty outcome or relevant data themselves. Arbitrary URLs in state are inert text; the server never fetches them. Tool arguments cannot override the HTTP endpoint, headers, method or credentials.
 
-Amazon/AMZN, Target and Costco descriptions without nonempty caller-supplied item evidence are forced to insufficient information regardless of confidence. Evidence presence is not evidence verification; fabricated or vague evidence and other mixed retailers still require human review. Embedded transaction instructions remain untrusted, scoped data; constrained output validation and review policy apply independently of the model.
+Success returns the **original Jev response** in both MCP `structuredContent` and JSON text content: `model`, `answers`, and `usage`, including any actual additional response fields. Choice returns choice/probabilities/confidence; Score returns score/legend/probabilities/confidence; Noul returns noul. Noul is not given invented confidence. No review or automatic-submission fields are added, and no rationale is generated. Choice/Score confidence measures distribution concentration, not calibrated correctness. Reading the result and deciding what action to take are caller responsibilities.
+
+The adapter validates matching answer IDs/types, probability bounds/coverage/sums, Choice selection, Score levels and weighted result, Noul range, and token usage. It permits normal distribution/score rounding without modifying values. Invalid provider responses become generic MCP errors. The response body is capped at 1 MiB and bounded JSON depth/nodes; no raw input, provider error bodies or credentials are logged.
+
+### Migration from the finance-specific tools
+
+This intentionally replaces `suggest_transaction_categories`; it is no longer listed and calls to that name return an unknown-tool error before inference. The short-lived 0.2.0 transaction/history/receipt/0.85-policy interface is removed. There is no compatibility wrapper carrying finance rules into the general service. Move relevant data into `state`, express the decision in `questions`, then interpret returned values in the caller workflow. The original finance implementation and the 0.2.0 commit remain in Git history; they were not rewritten away.
+
+MCP transport remains stateless Streamable HTTP with JSON responses, versions 2025-06-18 and 2025-03-26. Send JSON content type, `Accept: application/json, text/event-stream` and the negotiated `MCP-Protocol-Version` on subsequent requests. Initialize advertises service 0.3.0. GET/DELETE on `/mcp` return 405; no SSE/session state or transaction persistence is added.
+
+Existing OAuth identity, audience, expiry, scope and membership checks are preserved. The existing scope string **`transactions:suggest` is retained as a legacy authorization identifier** to avoid changing grants or credentials in this update; it now gates `evaluate_state`. It is not a transaction input schema or a newly provisioned permission. The service has no Sheets/email connection or budget-write capability.
 
 ## Authentication
 
@@ -66,15 +100,16 @@ Canonical resource uses API Gateway's trusted `requestContext.apiId` and Lambda'
 
 Infrastructure pins Family-PaaS `a59d41e0469d1a1336110fa2d6e46ee07f2eb168`. The runtime role can read the exact Jev secret, sign/get-public-key on the OAuth KMS key, read/write/delete authorization codes, and write its own log streams. The password hash is an environment variable (not recoverable as the password). The Jev API key never enters Terraform state or outputs. Jev key retrieval is lazy, cached for 5 minutes, with a 3-second timeout and one attempt.
 
-Jev calls use a fixed HTTPS endpoint, 12-second timeout, response-size/schema/distribution validation, no redirects and **zero retries** to avoid duplicate charges after uncertain failures. Lambda timeout is 25 seconds. API stage throttling is 1 request/second, burst 2. AWS throttling is best effort, not a monthly spending cap or per-user quota. Disable access logging here and never log event bodies, headers, tokens, transaction text, secret values or upstream error bodies. The application emits no request logs. API errors are generic. Caller-supplied content is transmitted to TypeSafe AI only on an authorized tool call; assess provider retention separately before real use.
+Jev calls use the fixed `https://api.typesafe.ai/v1/systemone` endpoint, 12-second timeout, response-size/schema validation, no redirects and **zero retries** to avoid duplicate charges after uncertain failures. Lambda timeout is 25 seconds. API stage throttling is 1 request/second, burst 2. AWS throttling is best effort, not a monthly spending cap or per-user quota. Disable access logging here and never log event bodies, headers, tokens, transaction text, secret values or upstream error bodies. The application emits no request logs. API errors are generic. Caller-supplied content is transmitted to TypeSafe AI only on an authorized tool call; assess provider retention separately before real use.
 
-## Offline evaluation
+## Publication and rollout
 
-`npm run evaluate -- <local-file.json>` reads only saved predictions paired with later user-confirmed labels. See `test/evaluation.synthetic.json` for the schema. It reports coverage, abstentions and exact-label agreement overall and by concentration band, plus model/policy versions. Synthetic results prove mechanics only, not model accuracy. Keep actual labels in ignored `evaluation-private/` and do not commit them. Use a separate held-out set, preserve taxonomy version in evaluation records, deduplicate recurring merchants across train/test splits, compare model/policy versions, inspect ambiguous merchants and per-category errors, and report sample sizes before adjusting thresholds. Human review remains required. Running evaluation never invokes Jev.
+The earlier 0.2.0 update was published to fork main as `ed04929` before the general-interface clarification arrived. This 0.3.0 change follows it as a separate commit, preserving that history. The current verification report is [docs/general-inference-verification.md](docs/general-inference-verification.md); older reports describe historical implementations.
 
-## Verified contracts
+After publishing/reviewing this update, an authorized operator uses the existing workload SSO/profile and ignored app configuration to run `npm run deploy:lambdas`. No Terraform apply, OAuth expansion or credential changes are needed for this code-only update. Refresh the client's cached tool discovery and confirm initialize reports 0.3.0 and tools/list advertises only `evaluate_state` before the first real inference call. Publication does not imply the connected service is updated. No deployment or paid inference was performed during development.
 
-Reviewed September 30, 2026:
-- [Jev introduction](https://docs.typesafe.ai/introduction), [Choice](https://docs.typesafe.ai/primitives/choice), [API](https://docs.typesafe.ai/api), [confidence](https://docs.typesafe.ai/confidence): fixed `/v1/systemone`, Bearer API key, `state/model/questions`, Choice criteria map, `answers` with choice/confidence/probabilities and returned model. `jev-latest` can change; select a supported pinned model after evaluation when reproducibility matters.
-- [MCP HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) and [authorization](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization).
-- [OpenAI MCP authentication](https://developers.openai.com/plugins/build/auth): provider discovery, resource binding, PKCE and client registration are necessary beyond JWT verification.
+## Verified upstream contracts
+
+Reviewed September 30, 2026: [TypeSafe API](https://docs.typesafe.ai/api), [Choice](https://docs.typesafe.ai/primitives/choice), [Score](https://docs.typesafe.ai/primitives/score), [Noul](https://docs.typesafe.ai/primitives/noul), [models](https://docs.typesafe.ai/models), and [confidence](https://docs.typesafe.ai/confidence). Input is text or structured JSON; images/receipts require caller preprocessing. The adapter has been documentation-verified and mock-tested, not exercised against live Jev.
+
+[MCP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) and [OpenAI authentication](https://developers.openai.com/plugins/build/auth) remain the protocol references. Offline evaluations belong with caller policy and user-confirmed labels; the finance-specific evaluation script and fixtures are removed from this general inference service.

@@ -3,8 +3,7 @@ import type {
   APIGatewayProxyStructuredResultV2,
 } from "aws-lambda";
 import { z } from "zod";
-import { inputSchema, suggest } from "./domain.js";
-import type { ChoiceClient } from "./jev.js";
+import { inputSchema, MAX_REQUEST_BYTES, type JevClient } from "./jev.js";
 import { AuthorizationError, SCOPE, type AuthConfig } from "./auth.js";
 import {
   authorizationServerMetadata,
@@ -43,7 +42,7 @@ function fromOAuth(result: OAuthResult): APIGatewayProxyStructuredResultV2 {
 export function createHandler(
   config: AuthConfig,
   verify: (token: string) => Promise<void>,
-  client: ChoiceClient,
+  client: JevClient,
   oauth?: OAuthConfig,
 ) {
   return async (
@@ -148,10 +147,10 @@ export function createHandler(
       !headers.accept.includes("text/event-stream")
     )
       return reply(406, { error: "Accept JSON and event-stream required" });
-    if ((event.body?.length || 0) > 90000)
+    if ((event.body?.length || 0) > 4 * Math.ceil(MAX_REQUEST_BYTES / 3))
       return reply(413, { error: "Request too large" });
     const body = decodeBody(event);
-    if (Buffer.byteLength(body) > 65536)
+    if (Buffer.byteLength(body) > MAX_REQUEST_BYTES)
       return reply(413, { error: "Request too large" });
     const error = (id: string | number | null, code: number, message: string) =>
       reply(200, { jsonrpc: "2.0", id, error: { code, message } });
@@ -197,7 +196,7 @@ export function createHandler(
             ? params!.protocolVersion
             : versions[0],
           capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: "jev-mcp", version: "0.1.0" },
+          serverInfo: { name: "jev-mcp", version: "0.3.0" },
         },
       });
     }
@@ -209,9 +208,9 @@ export function createHandler(
         result: {
           tools: [
             {
-              name: "suggest_transaction_categories",
+              name: "evaluate_state",
               description:
-                "Suggest categories for human review using Jev. Sends supplied descriptions and category definitions to TypeSafe AI. No spreadsheet access or writes. Confidence is distribution concentration, not accuracy. Provide only necessary context; all results require review.",
+                "Evaluate arbitrary caller-supplied JSON/text state using Jev Choice, Score or Noul questions. Pass instructions and criteria in the documented Jev schema; optionally override the deployed model. Sends this content to TypeSafe AI and returns its answers, model and usage unchanged. Confidence on Choice/Score measures distribution concentration, not calibrated correctness; Noul returns noul without invented confidence. No caller workflow decisions, data writes or external URL fetching. Limit: 20 questions, 255 Choice options, 2–10 Score levels, 512 KiB request. Existing OAuth authorization is required.",
               inputSchema: z.toJSONSchema(inputSchema),
               annotations: {
                 readOnlyHint: true,
@@ -225,12 +224,12 @@ export function createHandler(
         },
       });
     if (rpc !== "tools/call") return error(id, -32601, "Method not found");
-    if (params?.name !== "suggest_transaction_categories")
+    if (params?.name !== "evaluate_state")
       return error(id, -32602, "Unknown tool");
     const input = inputSchema.safeParse(params.arguments);
     if (!input.success) return error(id, -32602, "Invalid tool arguments");
     try {
-      const result = await suggest(input.data, client);
+      const result = await client.evaluate(input.data);
       return reply(200, {
         jsonrpc: "2.0",
         id,
@@ -249,7 +248,7 @@ export function createHandler(
           content: [
             {
               type: "text",
-              text: "Inference unavailable. No category suggestions produced.",
+              text: "Inference unavailable. No results produced.",
             },
           ],
         },

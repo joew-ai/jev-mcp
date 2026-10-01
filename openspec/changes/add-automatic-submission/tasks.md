@@ -1,0 +1,8 @@
+- [x] Inspect synchronized upstream and preserve OAuth/deployment changes.
+- [x] Implement optional automation targets, strict threshold and evidence blockers.
+- [x] Add bounded history, unknown-label support and current-target exclusion.
+- [x] Expand context and aggregate transport validation.
+- [x] Test thresholds, mixed retailers, receipt/whole evidence, history and backward compatibility.
+- [x] Document exact contract and publication/deployment steps.
+- [x] Complete final verification and local commit.
+- [ ] Separately authorized operator publication and Lambda rollout.

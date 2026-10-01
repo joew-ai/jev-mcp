@@ -1,14 +1,13 @@
 {
   "name": "jev-mcp",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "npx tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src lambdas test scripts",
+    "lint": "eslint src lambdas test",
     "build": "esbuild lambdas/mcp/index.ts --bundle --platform=node --target=node20 --outfile=dist/lambdas/mcp/index.js",
-    "evaluate": "npx tsx scripts/evaluate.ts",
     "deploy:seed": "npx tsx node_modules/family-paas/packages/deploy/src/index.ts --seed-lambdas",
     "deploy:lambdas": "npx tsx node_modules/family-paas/packages/deploy/src/index.ts --lambdas-only",
     "terraform:init": "npx tsx node_modules/family-paas/packages/deploy/src/index.ts --terraform-init"

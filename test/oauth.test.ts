@@ -17,7 +17,7 @@ import {
 } from "../src/oauth.js";
 import { createHandler } from "../src/server.js";
 import { createVerifier } from "../src/auth.js";
-import type { ChoiceClient } from "../src/jev.js";
+import type { JevClient } from "../src/jev.js";
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 
 const issuer = "https://mcp.example";
@@ -277,7 +277,7 @@ test("token exchange rejects a wrong PKCE verifier", async () => {
 
 test("handler exposes AS metadata and JWKS without MCP auth", async () => {
   const { config, jwk } = await signerConfig();
-  const client: ChoiceClient = {
+  const client: JevClient = {
     model: "mock",
     evaluate: async () => {
       throw new Error("no inference");
