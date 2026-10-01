@@ -219,6 +219,9 @@ export function createJevClient(
         });
         const body = JSON.stringify(input);
         if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new Error();
+        // Match legends against the JSON actually sent, including JSON's
+        // normalization of negative zero and object prototypes.
+        const sentInput = JSON.parse(body) as JevRequest;
         const key = await getKey();
         const response = await fetcher("https://api.typesafe.ai/v1/systemone", {
           method: "POST",
@@ -247,7 +250,7 @@ export function createJevClient(
         } finally {
           await reader.cancel();
         }
-        return validateResponse(JSON.parse(text + decoder.decode()), input);
+        return validateResponse(JSON.parse(text + decoder.decode()), sentInput);
       } catch {
         throw new Error("Inference unavailable");
       }

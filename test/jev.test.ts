@@ -147,6 +147,44 @@ test("Score legends preserve structured levels and match criteria independent of
   assert.deepEqual(await client.evaluate(request), raw);
 });
 
+test("Score legends match JSON-normalized negative zero in the outbound request", async () => {
+  const criteria = [{ value: -0 }, { value: 1 }];
+  const raw = {
+    model: "jev-1.13.0",
+    answers: {
+      level: {
+        type: "score",
+        score: 0.75,
+        confidence: 0.5,
+        probabilities: { "0": 0.25, "1": 0.75 },
+        legend: { "0": { value: 0 }, "1": { value: 1 } },
+      },
+    },
+    usage: { input_tokens: 10, output_tokens: 5 },
+  };
+  const client = createJevClient(
+    "jev-latest",
+    async () => "synthetic",
+    async (_url, options) => {
+      const sent = JSON.parse(String(options?.body));
+      assert.equal(Object.is(sent.questions.level.criteria[0].value, 0), true);
+      assert.deepEqual(sent.questions.level.criteria, [
+        { value: 0 },
+        { value: 1 },
+      ]);
+      return Response.json(raw);
+    },
+  );
+  assert.deepEqual(
+    await client.evaluate({
+      state: "Synthetic report",
+      questions: { level: { type: "score", instructions: "Rate", criteria } },
+    }),
+    raw,
+  );
+  assert.equal(Object.is(criteria[0].value, -0), true);
+});
+
 test("Score legends reject swapped strings, reordered arrays and altered nested levels", async () => {
   const cases = [
     {
