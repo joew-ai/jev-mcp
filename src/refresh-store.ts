@@ -93,7 +93,14 @@ export function dynamoRefreshStore(
         !item.idleExpires?.N
       )
         return undefined;
-      const grant: RefreshGrant = JSON.parse(item.data.S);
+      let grant: unknown;
+      try {
+        grant = JSON.parse(item.data.S);
+      } catch {
+        return undefined;
+      }
+      if (!grant || typeof grant !== "object" || Array.isArray(grant))
+        return undefined;
       const parsed = grantSchema.safeParse({
         ...grant,
         currentHash: item.currentHash.S,

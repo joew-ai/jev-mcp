@@ -1,3 +1,5 @@
+import { handleToken, handleRevoke, CHATGPT_CIMD } from "../src/oauth.js";
+import { signerConfig } from "./oauth-fixture.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -174,4 +176,66 @@ test("replacement hash collision and missing cancellation details are not proof 
     );
     await assert.rejects(store.rotate(grant, "new-hash", 1000));
   }
+});
+
+test("corrupt family JSON and non-object values fail closed without throwing", async () => {
+  for (const data of ["{broken", "null", "[]", "42", '"text"', "{}"]) {
+    const store = dynamoRefreshStore(
+      "table",
+      mockClient((command) => {
+        assert.ok(command instanceof GetItemCommand);
+        return command.input.Key?.pk.S === "refresh:old-hash"
+          ? { Item: { family: { S: grant.id } } }
+          : {
+              Item: {
+                data: { S: data },
+                currentHash: { S: "old-hash" },
+                revoked: { BOOL: false },
+                idleExpires: { N: "10000" },
+              },
+            };
+      }),
+    );
+    assert.equal(await store.get("old-hash"), undefined);
+  }
+});
+
+test("corrupt family JSON is invalid_grant on refresh and a non-disclosing revocation success", async () => {
+  const store = dynamoRefreshStore(
+    "table",
+    mockClient((command) => {
+      assert.ok(command instanceof GetItemCommand);
+      return command.input.Key?.pk.S?.startsWith("refresh:")
+        ? { Item: { family: { S: grant.id } } }
+        : {
+            Item: {
+              data: { S: "{broken" },
+              currentHash: { S: "old-hash" },
+              revoked: { BOOL: false },
+              idleExpires: { N: "10000" },
+            },
+          };
+    }),
+  );
+  const { config } = await signerConfig({ refresh: store });
+  const token = "x".repeat(43);
+  const form = "application/x-www-form-urlencoded";
+  const response = await handleToken(
+    new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: token,
+      client_id: CHATGPT_CIMD,
+    }).toString(),
+    form,
+    config,
+  );
+  assert.equal(response.statusCode, 400);
+  assert.deepEqual(response.body, { error: "invalid_grant" });
+  const revoked = await handleRevoke(
+    new URLSearchParams({ token, client_id: CHATGPT_CIMD }).toString(),
+    form,
+    config,
+  );
+  assert.equal(revoked.statusCode, 200);
+  assert.equal(revoked.body, undefined);
 });

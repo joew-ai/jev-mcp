@@ -53,7 +53,7 @@ Final verification on October 1, 2026:
 | Check | Result |
 | --- | --- |
 | `npm ci --ignore-scripts --cache /workspace/.npm-cache` | Passed; package/lock files unchanged |
-| `npm test` | **73 passed, 0 failed, 0 skipped** |
+| `npm test` | **75 passed, 0 failed, 0 skipped** |
 | `npm run typecheck` | Passed |
 | `npm run lint` | Passed |
 | `npm run build` | Passed; bundled output approximately 2.2 MiB |
@@ -63,7 +63,7 @@ Final verification on October 1, 2026:
 | `terraform fmt -check -recursive terraform` | Passed |
 | `git diff --check` | Passed |
 
-Tools: Node 24.19.0; Terraform 1.10.5; AWS Terraform provider 5.100.0. The IAM test intentionally targets the runtime policy and its dependencies inside a mocked apply, so Terraform emits targeting warnings. No real plan/apply was run. Earlier test-development failures (JWT error assertion, incomplete typed event fixture, and synthetic mock ARN/unknown-value issues) were corrected before the final successful runs. Existing general-inference, diagnostic, secret-loading and access-verification tests remain in the 73-test suite; `src/jev.ts`, `src/auth.ts`, `src/diagnostics.ts`, and dependency files are unchanged.
+Tools: Node 24.19.0; Terraform 1.10.5; AWS Terraform provider 5.100.0. The IAM test intentionally targets the runtime policy and its dependencies inside a mocked apply, so Terraform emits targeting warnings. No real plan/apply was run. Earlier test-development failures (JWT error assertion, incomplete typed event fixture, and synthetic mock ARN/unknown-value issues) were corrected before the final successful runs. Existing general-inference, diagnostic, secret-loading and access-verification tests remain in the 75-test suite; `src/jev.ts`, `src/auth.ts`, `src/diagnostics.ts`, and dependency files are unchanged.
 
 New coverage includes expired-access refresh with real RSA JWT verification; repeated rotation; simultaneous refresh/code exchanges; replay and family revocation; absolute and idle deadlines despite retained records; wrong client/resource/issuer/scope; membership removal; request-subject immutability; storage and signing errors with no token logging; uncertain committed writes; revoke/refresh races; HTTP routing; durable-store command conditions, strong reads and error classification; malformed stored expiry; and authorization-code namespace isolation.
 
@@ -87,3 +87,8 @@ A retry that provably never committed (e.g. failed signing or a canceled transac
 The added tests distinguish pre-commit conflict from a conflict after a competing commit, verify replay across multiple generations, verify that JWTs retain their documented lifetime after family revocation, exercise a failed revocation followed by retry, and reject misclassification of replacement-hash collision/missing cancellation details as proven family replay. Storage tests remain mocked; the DynamoDB Local HTTP 403 blocker remains.
 
 Follow-up verification: all 73 Node tests passed with zero skips; typecheck, lint, build and diff checks passed. Terraform files are unchanged by this review, so the previously successful validation, formatting and five mocked tests remain applicable. The portable patch was regenerated and checked against the original upstream base after this review.
+
+
+## PR #4 review correction
+
+The reviewer identified that malformed JSON in a persisted family record escaped schema validation and returned 503. The store now catches JSON syntax errors and rejects non-object JSON before schema validation. Refresh returns `invalid_grant`; revocation returns the same empty 200 as an unknown token. Actual DynamoDB failures still propagate to sanitized 503 responses. Regression tests cover malformed JSON, null/array/scalar values, and both endpoint behaviors. All 75 tests, typecheck, lint, build and diff checks passed after this correction; Terraform is unchanged.
